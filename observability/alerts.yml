@@ -1,0 +1,50 @@
+groups:
+  - name: smart-market-data-gateway
+    rules:
+      - alert: NoActiveUpstreamSubscriptions
+        expr: smdg_client_subscriptions > 0 and smdg_unique_upstream_subscriptions == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: Client subscriptions exist without upstream subscriptions
+
+      - alert: HighGatewayDeliveryLatency
+        expr: histogram_quantile(0.95, sum(rate(smdg_delivery_latency_seconds_bucket[5m])) by (le)) > 0.25
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: P95 quote delivery latency exceeds 250 ms
+
+      - alert: HighQuoteCoalescing
+        expr: sum(rate(smdg_coalesced_quote_events_total[5m])) > 100
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Slow consumers are causing heavy quote coalescing
+
+      - alert: RedisConsumerLag
+        expr: smdg_redis_pending_entries > 1000
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Redis quote processing group has excessive pending entries
+
+      - alert: ElevatedAuthenticationFailures
+        expr: sum(rate(smdg_auth_failures_total[5m])) > 5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Authentication failures are elevated
+
+      - alert: StaleQuoteReads
+        expr: sum(rate(smdg_stale_quote_reads_total[5m])) > 1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Clients are receiving stale quote snapshots
