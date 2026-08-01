@@ -1,5 +1,4 @@
 import asyncio
-from copy import deepcopy
 from datetime import timedelta
 import logging
 from uuid import UUID, uuid4
@@ -7,7 +6,10 @@ from uuid import UUID, uuid4
 import asyncpg
 from redis.asyncio import Redis
 
-from smart_market_data_gateway.candles import CandleBuilder
+from smart_market_data_gateway.candles import (
+    CandleBuilder,
+    CandleSymbolCheckpoint,
+)
 from smart_market_data_gateway.config import Settings, settings
 from smart_market_data_gateway.domain import AcceptedQuoteEvent, Candle
 from smart_market_data_gateway.durability import (
@@ -24,141 +26,13 @@ from smart_market_data_gateway.storage import RedisStore
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS quote_events (
-    event_id UUID NOT NULL,
-    provider_timestamp TIMESTAMPTZ NOT NULL,
-    received_at TIMESTAMPTZ NOT NULL,
-    accepted_at TIMESTAMPTZ NOT NULL,
-    data_cutoff TIMESTAMPTZ NOT NULL,
-    symbol TEXT NOT NULL,
-    provider TEXT NOT NULL,
-    sequence BIGINT,
-    price NUMERIC NOT NULL CHECK (price > 0),
-    bid NUMERIC CHECK (bid > 0),
-    ask NUMERIC CHECK (ask > 0),
-    quality_score DOUBLE PRECISION NOT NULL CHECK (quality_score BETWEEN 0 AND 1),
-    gap_detected BOOLEAN NOT NULL,
-    normalization_version TEXT NOT NULL,
-    source_stream_id TEXT,
-    payload JSONB NOT NULL,
-    persisted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (event_id, provider_timestamp)
-);
-CREATE INDEX IF NOT EXISTS quote_events_symbol_time_idx
-    ON quote_events (symbol, provider_timestamp DESC);
-CREATE INDEX IF NOT EXISTS quote_events_provider_time_idx
-    ON quote_events (provider, provider_timestamp DESC);
-
-CREATE TABLE IF NOT EXISTS accepted_event_integrity (
-    chain_name TEXT NOT NULL,
-    chain_sequence BIGINT NOT NULL CHECK (chain_sequence > 0),
-    profile TEXT NOT NULL,
-    event_id UUID NOT NULL,
-    provider_timestamp TIMESTAMPTZ NOT NULL,
-    source_stream_id TEXT,
-    payload_digest TEXT NOT NULL CHECK (payload_digest ~ '^sha256:[0-9a-f]{64}$'),
-    previous_record_hash TEXT CHECK (
-        previous_record_hash IS NULL OR previous_record_hash ~ '^sha256:[0-9a-f]{64}$'
-    ),
-    record_hash TEXT NOT NULL CHECK (record_hash ~ '^sha256:[0-9a-f]{64}$'),
-    appended_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (chain_name, chain_sequence),
-    UNIQUE (chain_name, event_id, provider_timestamp),
-    UNIQUE (chain_name, record_hash)
-);
-CREATE INDEX IF NOT EXISTS accepted_event_integrity_event_idx
-    ON accepted_event_integrity (event_id, provider_timestamp);
-
-CREATE OR REPLACE FUNCTION reject_accepted_event_integrity_mutation()
-RETURNS trigger
-LANGUAGE plpgsql
-AS $$
-BEGIN
-    RAISE EXCEPTION 'accepted_event_integrity is append-only';
-END;
-$$;
-DROP TRIGGER IF EXISTS accepted_event_integrity_append_only
-    ON accepted_event_integrity;
-CREATE TRIGGER accepted_event_integrity_append_only
-BEFORE UPDATE OR DELETE ON accepted_event_integrity
-FOR EACH ROW EXECUTE FUNCTION reject_accepted_event_integrity_mutation();
-
-CREATE TABLE IF NOT EXISTS integrity_chain_heads (
-    chain_name TEXT PRIMARY KEY,
-    chain_sequence BIGINT NOT NULL DEFAULT 0 CHECK (chain_sequence >= 0),
-    record_hash TEXT CHECK (
-        record_hash IS NULL OR record_hash ~ '^sha256:[0-9a-f]{64}$'
-    ),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    CHECK (
-        (chain_sequence = 0 AND record_hash IS NULL)
-        OR (chain_sequence > 0 AND record_hash IS NOT NULL)
-    )
-);
-INSERT INTO integrity_chain_heads (chain_name)
-VALUES ('accepted_quotes')
-ON CONFLICT (chain_name) DO NOTHING;
-
-CREATE TABLE IF NOT EXISTS candles (
-    symbol TEXT NOT NULL,
-    interval_seconds INTEGER NOT NULL CHECK (interval_seconds > 0),
-    bucket_start TIMESTAMPTZ NOT NULL,
-    open NUMERIC NOT NULL CHECK (open > 0),
-    high NUMERIC NOT NULL CHECK (high > 0),
-    low NUMERIC NOT NULL CHECK (low > 0),
-    close NUMERIC NOT NULL CHECK (close > 0),
-    event_count BIGINT NOT NULL CHECK (event_count > 0),
-    first_event_time TIMESTAMPTZ NOT NULL,
-    last_event_time TIMESTAMPTZ NOT NULL,
-    quality_score DOUBLE PRECISION NOT NULL CHECK (quality_score BETWEEN 0 AND 1),
-    finalized BOOLEAN NOT NULL DEFAULT TRUE,
-    schema_version TEXT NOT NULL,
-    persisted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (symbol, interval_seconds, bucket_start)
-);
-CREATE INDEX IF NOT EXISTS candles_symbol_interval_time_idx
-    ON candles (symbol, interval_seconds, bucket_start DESC);
-
-CREATE TABLE IF NOT EXISTS late_quote_events (
-    event_id UUID NOT NULL,
-    provider_timestamp TIMESTAMPTZ NOT NULL,
-    symbol TEXT NOT NULL,
-    interval_seconds INTEGER NOT NULL,
-    payload JSONB NOT NULL,
-    observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (event_id, provider_timestamp, interval_seconds)
-);
-
-CREATE TABLE IF NOT EXISTS data_quality_intervals (
-    provider TEXT NOT NULL,
-    symbol TEXT NOT NULL,
-    started_at TIMESTAMPTZ NOT NULL,
-    ended_at TIMESTAMPTZ,
-    status TEXT NOT NULL,
-    reason TEXT NOT NULL,
-    score DOUBLE PRECISION NOT NULL CHECK (score BETWEEN 0 AND 1),
-    details JSONB NOT NULL DEFAULT '{}'::jsonb,
-    PRIMARY KEY (provider, symbol, started_at)
-);
-
-CREATE TABLE IF NOT EXISTS market_sessions (
-    market TEXT NOT NULL,
-    session_date DATE NOT NULL,
-    opens_at TIMESTAMPTZ NOT NULL,
-    closes_at TIMESTAMPTZ NOT NULL,
-    timezone TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'scheduled',
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-    PRIMARY KEY (market, session_date),
-    CHECK (closes_at > opens_at)
-);
-"""
-
-_TIMESCALE_SQL = (
-    "SELECT create_hypertable('quote_events', 'provider_timestamp', if_not_exists => TRUE, migrate_data => TRUE)",
-    "SELECT create_hypertable('candles', 'bucket_start', if_not_exists => TRUE, migrate_data => TRUE)",
-    "SELECT create_hypertable('late_quote_events', 'provider_timestamp', if_not_exists => TRUE, migrate_data => TRUE)",
+REQUIRED_MIGRATION = "001_temporal_market_foundation.sql"
+REQUIRED_TABLES = (
+    "quote_events",
+    "accepted_event_integrity",
+    "integrity_chain_heads",
+    "candles",
+    "late_quote_events",
 )
 
 _INSERT_EVENT = """
@@ -178,11 +52,13 @@ INSERT INTO quote_events (
     gap_detected,
     normalization_version,
     source_stream_id,
+    source_stream_ms,
+    source_stream_sequence,
     payload
 )
 VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8,
-    $9, $10, $11, $12, $13, $14, $15, $16::jsonb
+    $9, $10, $11, $12, $13, $14, $15, $16, $17, $18::jsonb
 )
 ON CONFLICT (event_id, provider_timestamp) DO NOTHING
 RETURNING event_id
@@ -265,6 +141,23 @@ VALUES ($1, $2, $3, $4, $5::jsonb)
 ON CONFLICT (event_id, provider_timestamp, interval_seconds) DO NOTHING
 """
 
+_HYDRATE_QUERY = """
+WITH latest_by_symbol AS (
+    SELECT symbol, MAX(provider_timestamp) AS latest_timestamp
+    FROM quote_events
+    GROUP BY symbol
+)
+SELECT quote_events.payload::text
+FROM quote_events
+JOIN latest_by_symbol USING (symbol)
+WHERE quote_events.provider_timestamp >= latest_timestamp - $1::interval
+ORDER BY
+    source_stream_ms NULLS LAST,
+    source_stream_sequence NULLS LAST,
+    accepted_at,
+    event_id
+"""
+
 
 class HistorySink:
     """Persists accepted quotes and deterministic candles outside the gateway hot path."""
@@ -292,34 +185,55 @@ class HistorySink:
             command_timeout=self.config.history_command_timeout_seconds,
         )
         async with self.pool.acquire() as connection:
-            await self._prepare_schema(connection)
+            await self._verify_schema(connection)
+            await self._configure_retention(connection)
             await self._hydrate_builder(connection)
         await self.store.ensure_group(
             self.config.accepted_event_stream,
             self.config.history_group,
         )
 
-    async def _prepare_schema(self, connection: asyncpg.Connection) -> None:
-        try:
-            await connection.execute("CREATE EXTENSION IF NOT EXISTS timescaledb")
-        except asyncpg.PostgresError:
-            logger.warning(
-                "TimescaleDB extension is unavailable; using PostgreSQL-compatible tables",
-                extra={"event": "timescale_extension_unavailable"},
+    async def _verify_schema(self, connection: asyncpg.Connection) -> None:
+        migration_table = await connection.fetchval(
+            "SELECT to_regclass('public.schema_migrations')"
+        )
+        if migration_table is None:
+            raise RuntimeError(
+                "database schema is not migrated; run smdg-migrate before history-writer"
             )
-        await connection.execute(_SCHEMA_SQL)
+        applied = await connection.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM schema_migrations WHERE version = $1)",
+            REQUIRED_MIGRATION,
+        )
+        if not applied:
+            raise RuntimeError(
+                f"required migration {REQUIRED_MIGRATION} is missing; run smdg-migrate"
+            )
+        for table in REQUIRED_TABLES:
+            exists = await connection.fetchval(
+                "SELECT to_regclass($1)",
+                f"public.{table}",
+            )
+            if exists is None:
+                raise RuntimeError(
+                    f"required table {table} is missing after {REQUIRED_MIGRATION}"
+                )
+
+    async def _configure_retention(self, connection: asyncpg.Connection) -> None:
         has_timescale = bool(
             await connection.fetchval(
                 "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb')"
             )
         )
-        if has_timescale:
-            for statement in _TIMESCALE_SQL:
-                await connection.execute(statement)
-            await self._configure_retention(connection)
-
-    async def _configure_retention(self, connection: asyncpg.Connection) -> None:
+        if not has_timescale:
+            return
         if not self.config.enable_history_retention:
+            await connection.execute(
+                "SELECT remove_retention_policy('quote_events', if_exists => TRUE)"
+            )
+            await connection.execute(
+                "SELECT remove_retention_policy('candles', if_exists => TRUE)"
+            )
             return
         await connection.execute(
             "SELECT add_retention_policy('quote_events', make_interval(days => $1), if_not_exists => TRUE)",
@@ -338,46 +252,34 @@ class HistorySink:
             seconds=max(self.config.candle_intervals)
             + self.config.candle_allowed_lateness_seconds
         )
-        rows = await connection.fetch(
-            """
-            WITH latest_by_symbol AS (
-                SELECT symbol, MAX(provider_timestamp) AS latest_timestamp
-                FROM quote_events
-                GROUP BY symbol
-            )
-            SELECT quote_events.payload::text
-            FROM quote_events
-            JOIN latest_by_symbol USING (symbol)
-            WHERE quote_events.provider_timestamp >= latest_timestamp - $1::interval
-            ORDER BY
-              CASE
-                WHEN source_stream_id ~ '^[0-9]+-[0-9]+$'
-                THEN split_part(source_stream_id, '-', 1)::bigint
-              END NULLS LAST,
-              CASE
-                WHEN source_stream_id ~ '^[0-9]+-[0-9]+$'
-                THEN split_part(source_stream_id, '-', 2)::bigint
-              END NULLS LAST,
-              accepted_at,
-              event_id
-            """,
-            lookback,
-        )
-        for row in rows:
-            self.builder.add(AcceptedQuoteEvent.model_validate_json(row["payload"]))
+        async with connection.transaction():
+            cursor = connection.cursor(_HYDRATE_QUERY, lookback, prefetch=500)
+            async for row in cursor:
+                self.builder.add(AcceptedQuoteEvent.model_validate_json(row["payload"]))
 
     async def run(self) -> None:
         if self.pool is None:
             await self.start()
         while not self._closed:
             try:
-                messages = await self.store.read_group(
+                messages = await self.store.claim_stale(
                     self.config.accepted_event_stream,
                     self.config.history_group,
                     self.consumer_name,
+                    min_idle_ms=max(
+                        1,
+                        int(self.config.history_pending_idle_seconds * 1000),
+                    ),
                     count=self.config.history_batch_size,
-                    block_ms=1000,
                 )
+                if not messages:
+                    messages = await self.store.read_group(
+                        self.config.accepted_event_stream,
+                        self.config.history_group,
+                        self.consumer_name,
+                        count=self.config.history_batch_size,
+                        block_ms=1000,
+                    )
                 for stream_id, fields in messages:
                     await self._persist(stream_id, fields)
             except asyncio.CancelledError:
@@ -392,20 +294,22 @@ class HistorySink:
     async def _persist(self, stream_id: str, fields: dict[str, str]) -> None:
         if self.pool is None:
             raise RuntimeError("history sink is not started")
-        builder_before = deepcopy(self.builder)
+        accepted = AcceptedQuoteEvent.model_validate_json(fields["payload"])
+        checkpoint: CandleSymbolCheckpoint | None = None
+        committed = False
         try:
-            accepted = AcceptedQuoteEvent.model_validate_json(fields["payload"])
-            result = self.builder.add(accepted)
             async with self.pool.acquire() as connection:
                 async with connection.transaction():
                     inserted = await self._insert_event(connection, accepted)
-                    if inserted is None:
-                        self.builder = builder_before
-                    else:
+                    if inserted is not None:
                         crash_if(
                             self.failpoint,
                             HistoryFailpoint.AFTER_LEDGER_APPEND_BEFORE_COMMIT,
                         )
+                        checkpoint = self.builder.checkpoint_symbol(
+                            accepted.event.symbol
+                        )
+                        result = self.builder.add(accepted)
                         for interval in result.late_intervals:
                             await connection.execute(
                                 _INSERT_LATE_EVENT,
@@ -417,6 +321,7 @@ class HistorySink:
                             )
                         for candle in result.finalized:
                             await self._upsert_candle(connection, candle)
+            committed = True
             crash_if(
                 self.failpoint,
                 HistoryFailpoint.AFTER_DB_COMMIT_BEFORE_ACK,
@@ -427,7 +332,8 @@ class HistorySink:
                 stream_id,
             )
         except Exception as exc:
-            self.builder = builder_before
+            if checkpoint is not None and not committed:
+                self.builder.restore_symbol(checkpoint)
             retry_count = await self.store.increment_retry(
                 f"history:{self.config.accepted_event_stream}:{stream_id}"
             )
@@ -493,7 +399,7 @@ class HistorySink:
         accepted: AcceptedQuoteEvent,
     ) -> UUID | None:
         event = accepted.event
-        payload = accepted.model_dump_json()
+        stream_ms, stream_sequence = _parse_stream_order(accepted.source_stream_id)
         value = await connection.fetchval(
             _INSERT_EVENT,
             event.event_id,
@@ -511,7 +417,9 @@ class HistorySink:
             accepted.quality.gap_detected,
             accepted.quality.normalization_version,
             accepted.source_stream_id,
-            payload,
+            stream_ms,
+            stream_sequence,
+            accepted.model_dump_json(),
         )
         if not isinstance(value, UUID):
             return None
@@ -545,6 +453,21 @@ class HistorySink:
         if self.pool is not None:
             await self.pool.close()
             self.pool = None
+
+
+def _parse_stream_order(source_stream_id: str | None) -> tuple[int | None, int | None]:
+    if not source_stream_id:
+        return None, None
+    milliseconds, separator, sequence = source_stream_id.partition("-")
+    if not separator:
+        return None, None
+    try:
+        parsed = (int(milliseconds), int(sequence))
+    except ValueError:
+        return None, None
+    if parsed[0] < 0 or parsed[1] < 0:
+        return None, None
+    return parsed
 
 
 async def _run() -> None:
