@@ -40,7 +40,7 @@ class AuthService:
 
     async def authenticate(self, token: str | None) -> ClientIdentity:
         if not token:
-            if self.settings.environment == "development" and self.settings.allow_anonymous_dev:
+            if self.settings.allow_anonymous_dev:
                 return ClientIdentity(client_id="anonymous-dev", tier=ServiceTier.BASIC)
             self.metrics.auth_failures.labels("missing_token").inc()
             raise AuthenticationError("authentication required")
