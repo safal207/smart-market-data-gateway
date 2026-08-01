@@ -42,10 +42,12 @@ async def process_all(store: RedisStore, processor: QuoteProcessor) -> None:
 
 async def test_only_one_duplicate_enters_accepted_stream(redis_client, test_settings) -> None:
     store = RedisStore(redis_client, test_settings)
+    timestamp = datetime.now(UTC)
     event = quote(
         event_id=1,
         sequence=1,
-        provider_timestamp=datetime(2026, 8, 1, 12, 0, tzinfo=UTC),
+        provider_timestamp=timestamp,
+        received_at=timestamp,
     )
     await store.publish_quote(event)
     await store.publish_quote(event)
@@ -65,7 +67,7 @@ async def test_only_one_duplicate_enters_accepted_stream(redis_client, test_sett
 
 async def test_out_of_order_event_is_audited_but_not_fanned_out(redis_client, test_settings) -> None:
     store = RedisStore(redis_client, test_settings)
-    timestamp = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
+    timestamp = datetime.now(UTC) - timedelta(seconds=2)
     newer = quote(event_id=2, sequence=2, provider_timestamp=timestamp + timedelta(seconds=1))
     older = quote(event_id=1, sequence=1, provider_timestamp=timestamp)
     await store.publish_quote(newer)
@@ -88,12 +90,12 @@ async def test_out_of_order_event_is_audited_but_not_fanned_out(redis_client, te
 async def test_stale_event_does_not_enter_history_or_latest_cache(redis_client, test_settings) -> None:
     strict_settings = test_settings.model_copy(update={"accepted_event_max_age_seconds": 1.0})
     store = RedisStore(redis_client, strict_settings)
-    timestamp = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
+    received_at = datetime.now(UTC)
     event = quote(
         event_id=3,
         sequence=1,
-        provider_timestamp=timestamp,
-        received_at=timestamp + timedelta(seconds=5),
+        provider_timestamp=received_at - timedelta(seconds=5),
+        received_at=received_at,
     )
     await store.publish_quote(event)
 
