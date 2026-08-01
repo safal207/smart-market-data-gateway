@@ -20,6 +20,7 @@ from smart_market_data_gateway.domain import (
 logger = logging.getLogger(__name__)
 
 EventClaimStatus = Literal["claimed", "processed", "busy"]
+StreamMessage = tuple[str, dict[str, str]]
 
 _CLAIM_EVENT_SCRIPT = """
 if redis.call('EXISTS', KEYS[1]) == 1 then
@@ -119,7 +120,7 @@ class RedisStore:
         *,
         count: int = 100,
         block_ms: int = 1000,
-    ) -> list[tuple[str, dict[str, str]]]:
+    ) -> list[StreamMessage]:
         result = await self.redis.xreadgroup(
             group,
             consumer,
@@ -127,11 +128,30 @@ class RedisStore:
             count=count,
             block=block_ms,
         )
-        messages: list[tuple[str, dict[str, str]]] = []
+        messages: list[StreamMessage] = []
         for _stream_name, entries in result:
-            for stream_id, fields in entries:
-                messages.append((str(stream_id), {str(k): str(v) for k, v in fields.items()}))
+            messages.extend(self._normalize_entries(entries))
         return messages
+
+    async def claim_stale(
+        self,
+        stream: str,
+        group: str,
+        consumer: str,
+        *,
+        min_idle_ms: int,
+        count: int = 100,
+    ) -> list[StreamMessage]:
+        claimed = await self.redis.xautoclaim(
+            stream,
+            group,
+            consumer,
+            min_idle_time=min_idle_ms,
+            start_id="0-0",
+            count=count,
+        )
+        entries = claimed[1] if isinstance(claimed, (list, tuple)) and len(claimed) > 1 else []
+        return self._normalize_entries(entries)
 
     async def ack(self, stream: str, group: str, *stream_ids: str) -> None:
         if stream_ids:
@@ -333,6 +353,18 @@ class RedisStore:
         if isinstance(summary, (list, tuple)) and summary:
             return int(summary[0])
         return 0
+
+    @staticmethod
+    def _normalize_entries(entries: Any) -> list[StreamMessage]:
+        messages: list[StreamMessage] = []
+        for stream_id, fields in entries:
+            messages.append(
+                (
+                    str(stream_id),
+                    {str(key): str(value) for key, value in fields.items()},
+                )
+            )
+        return messages
 
     @staticmethod
     def _processed_key(event: QuoteEvent) -> str:
