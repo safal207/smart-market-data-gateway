@@ -15,6 +15,8 @@ channels:
         $ref: '#/components/messages/SubscribeCommand'
       unsubscribeCommand:
         $ref: '#/components/messages/UnsubscribeCommand'
+      pingCommand:
+        $ref: '#/components/messages/PingCommand'
       serverMessage:
         $ref: '#/components/messages/ServerMessage'
 operations:
@@ -25,6 +27,7 @@ operations:
     messages:
       - $ref: '#/channels/marketStream/messages/subscribeCommand'
       - $ref: '#/channels/marketStream/messages/unsubscribeCommand'
+      - $ref: '#/channels/marketStream/messages/pingCommand'
   sendEvents:
     action: send
     channel:
@@ -71,11 +74,22 @@ components:
             uniqueItems: true
             items:
               type: string
+              pattern: '^[A-Z0-9._:-]{1,32}$'
           channels:
             type: array
             items:
               type: string
             default: [quote]
+          request_id:
+            type: string
+    PingCommand:
+      payload:
+        type: object
+        additionalProperties: false
+        required: [action]
+        properties:
+          action:
+            const: ping
           request_id:
             type: string
     ServerMessage:
