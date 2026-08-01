@@ -11,6 +11,7 @@ from jwt import PyJWKClient
 from smart_market_data_gateway.config import Settings
 from smart_market_data_gateway.domain import ClientIdentity, ServiceTier
 from smart_market_data_gateway.metrics import GatewayMetrics
+from smart_market_data_gateway.rate_limit import RedisTokenBucket
 from smart_market_data_gateway.storage import RedisStore
 
 logger = logging.getLogger(__name__)
@@ -188,7 +189,11 @@ class AuthorizationService:
 
 class DistributedRateLimiter:
     def __init__(self, store: RedisStore) -> None:
-        self.store = store
+        self.bucket = RedisTokenBucket(store.redis)
 
     async def allow(self, scope: str, identity: ClientIdentity, limit: int) -> bool:
-        return await self.store.rate_limit(f"{scope}:{identity.client_id}", limit)
+        allowed, _remaining = await self.bucket.allow(
+            f"{scope}:{identity.client_id}",
+            requests_per_minute=limit,
+        )
+        return allowed
