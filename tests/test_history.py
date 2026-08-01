@@ -3,6 +3,7 @@ from decimal import Decimal
 import os
 from uuid import UUID
 
+import asyncpg
 import pytest
 
 from smart_market_data_gateway.candles import CandleBuilder
@@ -46,6 +47,19 @@ def history_database_url() -> str:
     return database_url
 
 
+async def reset_history_tables(connection: asyncpg.Connection) -> None:
+    await connection.execute(
+        "TRUNCATE TABLE accepted_event_integrity, late_quote_events, candles, quote_events"
+    )
+    await connection.execute(
+        """
+        UPDATE integrity_chain_heads
+        SET chain_sequence = 0, record_hash = NULL, updated_at = NOW()
+        WHERE chain_name = 'accepted_quotes'
+        """
+    )
+
+
 async def test_history_sink_persists_events_and_finalized_candles(
     redis_client,
     test_settings,
@@ -63,7 +77,7 @@ async def test_history_sink_persists_events_and_finalized_candles(
     assert sink.pool is not None
 
     async with sink.pool.acquire() as connection:
-        await connection.execute("TRUNCATE TABLE late_quote_events, candles, quote_events")
+        await reset_history_tables(connection)
     sink.builder = CandleBuilder((1,), allowed_lateness_seconds=0)
 
     start = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
@@ -88,6 +102,16 @@ async def test_history_sink_persists_events_and_finalized_candles(
 
     async with sink.pool.acquire() as connection:
         event_count = await connection.fetchval("SELECT COUNT(*) FROM quote_events")
+        integrity_count = await connection.fetchval(
+            "SELECT COUNT(*) FROM accepted_event_integrity"
+        )
+        integrity_head = await connection.fetchval(
+            """
+            SELECT chain_sequence
+            FROM integrity_chain_heads
+            WHERE chain_name = 'accepted_quotes'
+            """
+        )
         candle = await connection.fetchrow(
             """
             SELECT open, high, low, close, event_count, finalized
@@ -97,6 +121,8 @@ async def test_history_sink_persists_events_and_finalized_candles(
             start,
         )
     assert event_count == 3
+    assert integrity_count == 3
+    assert integrity_head == 3
     assert candle is not None
     assert candle["open"] == Decimal("100")
     assert candle["high"] == Decimal("102")
@@ -125,7 +151,7 @@ async def test_history_restart_restores_active_window_for_each_symbol(
     assert sink.pool is not None
 
     async with sink.pool.acquire() as connection:
-        await connection.execute("TRUNCATE TABLE late_quote_events, candles, quote_events")
+        await reset_history_tables(connection)
         async with connection.transaction():
             await sink._insert_event(
                 connection,
