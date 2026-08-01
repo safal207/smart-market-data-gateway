@@ -51,8 +51,9 @@ async def apply_migrations(
     await connection.execute("SELECT pg_advisory_lock($1)", MIGRATION_LOCK_ID)
     results: list[AppliedMigration] = []
     try:
-        for path in discover_migrations(directory):
-            sql = path.read_text(encoding="utf-8")
+        migration_paths = await asyncio.to_thread(discover_migrations, directory)
+        for path in migration_paths:
+            sql = await asyncio.to_thread(path.read_text, encoding="utf-8")
             checksum = migration_checksum(sql)
             existing = await connection.fetchval(
                 "SELECT checksum FROM schema_migrations WHERE version = $1",
@@ -63,9 +64,7 @@ async def apply_migrations(
                     raise MigrationError(
                         f"applied migration checksum changed: {path.name}"
                     )
-                results.append(
-                    AppliedMigration(path.name, checksum, applied=False)
-                )
+                results.append(AppliedMigration(path.name, checksum, applied=False))
                 continue
 
             async with connection.transaction():
