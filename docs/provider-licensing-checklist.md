@@ -2,6 +2,14 @@
 
 Complete this document before enabling a real provider outside an isolated technical test.
 
+## Current candidate status
+
+| Provider | Technical status | Commercial redistribution | Public provider-backed benchmark |
+|---|---|---|---|
+| Tradernet / Freedom | Adapter implemented for public demo and SID-session quote tests | **Blocked: terms not yet approved** | **Blocked: publication rights unknown** |
+
+The repository may run isolated quote-ingestion tests with the minimum symbol set. It must not claim that a working API implies permission to cache, redistribute, sell, or publish the underlying market data.
+
 ## Provider identification
 
 - Provider and product:

@@ -16,7 +16,7 @@ Web / Mobile / API clients
   └─ Prometheus metrics + JSON logs
           │ global first/last subscription transitions
           ▼
- Redis control stream ──► Collector ──► Market-data provider
+ Redis control stream ──► Collector ──► Mock or Tradernet/Freedom provider
                                   │ normalized QuoteEvent v1
                                   ▼
                          Redis quote stream
@@ -37,7 +37,8 @@ Redis Streams provide durable, acknowledged processing. Redis Pub/Sub broadcasts
 
 ## Implemented capabilities
 
-- vendor-neutral provider adapter and deterministic mock provider;
+- vendor-neutral provider interface, deterministic mock provider, and read-only Tradernet/Freedom quote adapter;
+- Tradernet public/demo and SID-session WebSocket modes, explicit API-key gate, and HTTP snapshot fallback;
 - provider reconnect with capped exponential backoff, jitter, restored symbols, outage metrics, and alerts;
 - Redis Streams, consumer groups, stale-entry reclaim, bounded retries, dead-letter stream, and deduplication;
 - sequence gap and out-of-order detection with degraded-stream metadata;
@@ -54,6 +55,7 @@ Redis Streams provide durable, acknowledged processing. Redis Pub/Sub broadcasts
 - asynchronous idempotent usage capture and durable PostgreSQL audit records;
 - deterministic before/after routing benchmark with payload-byte accounting;
 - deployed WebSocket load runner with P50/P95/P99 latency, throughput, errors, and network bytes;
+- Tradernet staged profiles plus reconnect-storm, zombie-cleanup, and frozen-stream resilience runners;
 - OpenAPI, AsyncAPI, public v1 compatibility manifest, C4 diagrams, ADRs, licensing gate, tests, and CI.
 
 Critical transactional events such as order statuses, trade confirmations, risk events, and critical alerts are deliberately excluded from quote-throttling and replacement semantics.
@@ -71,7 +73,7 @@ Services:
 |---|---|
 | REST/OpenAPI | `http://localhost:8000/docs` |
 | WebSocket | `ws://localhost:8000/v1/stream` |
-| Collector | mock provider + control/quote streams |
+| Collector | selected provider + control/quote streams |
 | Usage writer | Redis usage stream → PostgreSQL |
 | Prometheus | `http://localhost:9090` |
 | Grafana | `http://localhost:3000` (`admin` / `admin`) |
@@ -112,6 +114,47 @@ WebSocket commands:
 }
 ```
 
+## Tradernet / Freedom quote provider
+
+Public/demo mode:
+
+```env
+SMDG_PROVIDER=tradernet
+SMDG_TRADERNET_MODE=public_demo
+SMDG_TRADERNET_WEBSOCKET_URL=wss://wss.tradernet.com/
+SMDG_TRADERNET_INTEGRATION_SYMBOLS=AAPL.US,MSFT.US
+```
+
+Authenticated SID integration test:
+
+```env
+SMDG_PROVIDER=tradernet
+SMDG_TRADERNET_MODE=sid_session
+SMDG_TRADERNET_SID=<secret>
+SMDG_TRADERNET_USER_ID=<optional-user-id>
+```
+
+A previously tested development endpoint can be supplied without code changes:
+
+```env
+SMDG_TRADERNET_WEBSOCKET_URL=wss://wssdev.tradernet.dev
+```
+
+The adapter sends complete quote-watch lists as `["quotes", [symbols...]]`, accepts `q` quote events, normalizes decimal commas, derives deterministic event IDs, rejects SID sessions that silently fall back to demo mode, and uses `/securities/export?tickers=AAPL.US+MSFT.US` as a snapshot fallback. The literal `+` separator is preserved deliberately.
+
+API-key mode is not guessed. It remains disabled until the current Tradernet HMAC canonical-string and signing contract are verified from authoritative documentation.
+
+Run the direct opt-in provider check:
+
+```bash
+python scripts/tradernet_integration.py \
+  --symbols AAPL.US,MSFT.US \
+  --events 20 \
+  --timeout 30
+```
+
+The generated report excludes SID, user ID, API key, and secret values.
+
 ## Development
 
 ```bash
@@ -125,7 +168,7 @@ pytest
 python scripts/check_contract_compatibility.py
 ```
 
-Integration tests use Redis database 15 and PostgreSQL when `TEST_REDIS_URL` and `TEST_DATABASE_URL` are set.
+Integration tests use Redis database 15 and PostgreSQL when `TEST_REDIS_URL` and `TEST_DATABASE_URL` are set. Tradernet network tests are opt-in and require explicit environment configuration.
 
 ## Benchmarks
 
@@ -141,7 +184,7 @@ smdg-benchmark \
   --output benchmark-results
 ```
 
-Real WebSocket connections against a deployed stack:
+Direct WebSocket load against the gateway:
 
 ```bash
 python benchmarks/ws_load.py \
@@ -151,7 +194,27 @@ python benchmarks/ws_load.py \
   --messages 20
 ```
 
-The CI smoke benchmark uploads raw JSON and Markdown artifacts. No simulated result is presented as a production fact. A real-provider benchmark will be performed only after selecting a provider, confirming its caching, redistribution, non-display, and benchmark rights, and recording the exact environment and commit SHA.
+Run a staged Tradernet profile:
+
+```bash
+python benchmarks/run_tradernet_profile.py \
+  --profile smoke \
+  --symbols AAPL.US,MSFT.US,NVDA.US,TSLA.US,AMZN.US \
+  --commit-sha "$(git rev-parse HEAD)" \
+  --market-session open
+```
+
+Available profiles include `smoke`, `medium-100`, `medium-500`, `load-1000`, `load-10000`, and `legacy-673`. The `legacy-673` profile refuses to run unless a file containing at least 673 real symbols is supplied through `--symbols-file`.
+
+Resilience scenarios:
+
+```bash
+python benchmarks/resilience_load.py --scenario reconnect-storm --clients 100
+python benchmarks/resilience_load.py --scenario zombie-cleanup --clients 100
+python benchmarks/resilience_load.py --scenario frozen-stream --clients 100
+```
+
+The CI smoke benchmark uploads raw JSON and Markdown artifacts. Synthetic, deployed-gateway, and provider-backed measurements are reported separately. Provider-backed publication requires confirmed caching, redistribution, non-display, historical-storage, and benchmark rights plus the exact environment, market session, symbol set, and commit SHA.
 
 ## Documentation
 
@@ -164,8 +227,9 @@ The CI smoke benchmark uploads raw JSON and Markdown artifacts. No simulated res
 - [WebSocket AsyncAPI](docs/asyncapi.yaml)
 - [Public API compatibility manifest](contracts/public-api-v1.json)
 - [Benchmark methodology](docs/benchmark-methodology.md)
+- [Tradernet/Freedom adapter](docs/providers/tradernet.md)
 - [Provider licensing checklist](docs/provider-licensing-checklist.md)
 
 ## Licensing warning
 
-Commercial redistribution, caching, non-display use, historical storage, and public benchmark publication depend on provider and exchange terms. The real-provider adapter remains a separate gated step; no commercial redistribution is enabled by this repository alone.
+A technically working API does not grant permission to cache, redistribute, sell, or publish market data. Commercial redistribution, non-display use, historical storage, and public provider-backed benchmark publication remain blocked until the applicable Tradernet/Freedom and exchange terms are reviewed and approved.
