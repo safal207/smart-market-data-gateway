@@ -151,7 +151,11 @@ async def _run(args: argparse.Namespace) -> int:
             )
         else:
             if args.output:
-                output_handle = Path(args.output).open("w", encoding="utf-8")
+                output_handle = await asyncio.to_thread(
+                    Path(args.output).open,
+                    "w",
+                    encoding="utf-8",
+                )
             else:
                 import sys
 
@@ -161,7 +165,7 @@ async def _run(args: argparse.Namespace) -> int:
         return await service.run(speed=parse_speed(args.speed))
     finally:
         if output_handle is not None and args.output:
-            output_handle.close()
+            await asyncio.to_thread(output_handle.close)
         if redis is not None:
             await redis.aclose()
         await pool.close()
