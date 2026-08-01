@@ -3,6 +3,7 @@ import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import datetime
 from pathlib import Path
+import sys
 from typing import TextIO
 
 import asyncpg
@@ -35,7 +36,7 @@ class ReplayService:
         previous_timestamp: datetime | None = None
         emitted = 0
         async for accepted in self.source:
-            current_timestamp = accepted.event.provider_timestamp
+            current_timestamp = accepted.quality.accepted_at
             if speed is not None and previous_timestamp is not None:
                 delay = max(0.0, (current_timestamp - previous_timestamp).total_seconds()) / speed
                 if delay > 0:
@@ -60,7 +61,17 @@ async def postgres_events(
         WHERE ($1::timestamptz IS NULL OR provider_timestamp >= $1)
           AND ($2::timestamptz IS NULL OR provider_timestamp < $2)
           AND ($3::text[] IS NULL OR symbol = ANY($3))
-        ORDER BY provider_timestamp, received_at, event_id
+        ORDER BY
+          CASE
+            WHEN source_stream_id ~ '^[0-9]+-[0-9]+$'
+            THEN split_part(source_stream_id, '-', 1)::bigint
+          END NULLS LAST,
+          CASE
+            WHEN source_stream_id ~ '^[0-9]+-[0-9]+$'
+            THEN split_part(source_stream_id, '-', 2)::bigint
+          END NULLS LAST,
+          accepted_at,
+          event_id
     """
     async with pool.acquire() as connection:
         async with connection.transaction():
@@ -79,7 +90,10 @@ def parse_speed(value: str) -> float | None:
     normalized = value.strip().lower()
     if normalized == "max":
         return None
-    speed = float(normalized.removesuffix("x"))
+    try:
+        speed = float(normalized.removesuffix("x"))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("speed must be max or a positive number") from exc
     if speed <= 0:
         raise argparse.ArgumentTypeError("speed must be max or a positive number")
     return speed
@@ -88,7 +102,10 @@ def parse_speed(value: str) -> float | None:
 def parse_timestamp(value: str | None) -> datetime | None:
     if value is None:
         return None
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("timestamp must be valid ISO-8601") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise argparse.ArgumentTypeError("timestamps must include an explicit timezone")
     return parsed
@@ -99,8 +116,8 @@ class JsonlEmitter:
         self.output = output
 
     async def __call__(self, accepted: AcceptedQuoteEvent) -> None:
-        self.output.write(accepted.model_dump_json() + "\n")
-        self.output.flush()
+        await asyncio.to_thread(self.output.write, accepted.model_dump_json() + "\n")
+        await asyncio.to_thread(self.output.flush)
 
 
 class RedisStreamEmitter:
@@ -117,6 +134,8 @@ class RedisStreamEmitter:
                 "event_id": str(accepted.event.event_id),
                 "symbol": accepted.event.symbol,
                 "event_time": accepted.event.provider_timestamp.isoformat(),
+                "accepted_at": accepted.quality.accepted_at.isoformat(),
+                "source_stream_id": accepted.source_stream_id or "",
                 "replay": "true",
             },
             maxlen=self.maxlen,
@@ -157,8 +176,6 @@ async def _run(args: argparse.Namespace) -> int:
                     encoding="utf-8",
                 )
             else:
-                import sys
-
                 output_handle = sys.stdout
             emitter = JsonlEmitter(output_handle)
         service = ReplayService(source, emitter)
@@ -173,8 +190,8 @@ async def _run(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Replay accepted quote events deterministically")
-    parser.add_argument("--from", dest="start", help="inclusive ISO-8601 timestamp")
-    parser.add_argument("--to", dest="end", help="exclusive ISO-8601 timestamp")
+    parser.add_argument("--from", dest="start", help="inclusive market-time ISO-8601 timestamp")
+    parser.add_argument("--to", dest="end", help="exclusive market-time ISO-8601 timestamp")
     parser.add_argument("--symbol", action="append", default=[], help="symbol filter; repeatable")
     parser.add_argument("--speed", default="max", help="max, 1, 10, or another positive multiplier")
     parser.add_argument("--output", help="JSONL output path; defaults to stdout")
@@ -188,7 +205,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     args = build_parser().parse_args()
     emitted = asyncio.run(_run(args))
-    print(f"replayed_events={emitted}")
+    print(f"replayed_events={emitted}", file=sys.stderr)
 
 
 if __name__ == "__main__":
