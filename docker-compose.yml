@@ -63,8 +63,11 @@ services:
     command: ["python", "-m", "smart_market_data_gateway.collector"]
     environment:
       <<: *gateway-environment
+      SMDG_COLLECTOR_METRICS_PORT: "9101"
       SMDG_MOCK_SYMBOLS: AAPL,TSLA,NVDA,MSFT,GOOG,AMZN,META,AMD,INTC,ORCL
       SMDG_MOCK_INTERVAL_SECONDS: "0.1"
+    expose:
+      - "9101"
     depends_on:
       redis:
         condition: service_healthy
@@ -81,6 +84,8 @@ services:
     depends_on:
       api:
         condition: service_healthy
+      collector:
+        condition: service_started
 
   grafana:
     image: grafana/grafana:12.1.0
