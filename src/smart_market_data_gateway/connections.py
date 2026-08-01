@@ -1,5 +1,6 @@
 import time
-from typing import Any
+from collections.abc import Awaitable
+from typing import Any, cast
 
 from redis.asyncio import Redis
 
@@ -47,18 +48,22 @@ class ConnectionRegistry:
         max_connections: int,
     ) -> tuple[bool, int]:
         now = time.time()
-        result: list[Any] = await self.redis.eval(
-            _ACQUIRE_SCRIPT,
-            2,
-            self._client_key(client_id),
-            self._owner_key(connection_id),
-            now,
-            now + self.settings.subscription_ttl_seconds,
-            connection_id,
-            max_connections,
-            self.settings.subscription_ttl_seconds,
-            client_id,
+        evaluation = cast(
+            Awaitable[Any],
+            self.redis.eval(
+                _ACQUIRE_SCRIPT,
+                2,
+                self._client_key(client_id),
+                self._owner_key(connection_id),
+                str(now),
+                str(now + self.settings.subscription_ttl_seconds),
+                connection_id,
+                str(max_connections),
+                str(self.settings.subscription_ttl_seconds),
+                client_id,
+            ),
         )
+        result = cast(list[Any], await evaluation)
         return bool(int(result[0])), int(result[1])
 
     async def heartbeat(self, connection_id: str) -> None:
