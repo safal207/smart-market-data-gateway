@@ -70,18 +70,29 @@ class QuoteProcessor:
         return result
 
     async def _process_one(self, stream_id: str, fields: dict[str, str]) -> None:
+        event: QuoteEvent | None = None
+        claimed = False
         try:
             payload = fields["payload"]
             event = QuoteEvent.model_validate_json(payload)
-            if not await self.store.accept_event_once(event):
+            claim_status = await self.store.claim_event(event, stream_id)
+            if claim_status == "busy":
+                logger.debug(
+                    "quote event is already being processed",
+                    extra={"event": "quote_event_busy", "stream_id": stream_id},
+                )
+                return
+            if claim_status == "processed":
                 self.metrics.deduplicated_events.inc()
                 await self._reject(event, stream_id, QuoteRejectionReason.DUPLICATE)
                 await self._ack(stream_id)
                 return
+            claimed = True
 
+            accepted_at = datetime.now(UTC)
             feed_age_seconds = max(
                 0.0,
-                (event.received_at - event.provider_timestamp).total_seconds(),
+                (accepted_at - event.provider_timestamp).total_seconds(),
             )
             if feed_age_seconds > self.settings.accepted_event_max_age_seconds:
                 await self._reject(
@@ -90,6 +101,7 @@ class QuoteProcessor:
                     QuoteRejectionReason.STALE,
                     detail=f"feed age {feed_age_seconds:.3f}s exceeds accepted limit",
                 )
+                await self.store.mark_event_processed(event)
                 await self._ack(stream_id)
                 return
 
@@ -106,7 +118,7 @@ class QuoteProcessor:
                             "previous_sequence": observation.previous_sequence,
                             "current_sequence": observation.current_sequence,
                             "gap": observation.gap,
-                            "observed_at": datetime.now(UTC).isoformat(),
+                            "observed_at": accepted_at.isoformat(),
                         }
                     ),
                     ex=300,
@@ -130,10 +142,10 @@ class QuoteProcessor:
                             f"{observation.previous_sequence}"
                         ),
                     )
+                    await self.store.mark_event_processed(event)
                     await self._ack(stream_id)
                     return
 
-            accepted_at = datetime.now(UTC)
             quality_score = 0.8 if observation is not None else 1.0
             if event.sequence is None:
                 quality_score = min(quality_score, 0.9)
@@ -155,11 +167,16 @@ class QuoteProcessor:
             await self.store.publish_accepted_event(accepted)
             await self.store.cache_quote(event)
             await self.store.publish_fanout(event)
+            await self.store.mark_event_processed(event)
             self.metrics.provider_events.labels(event.provider).inc()
             await self._ack(stream_id)
         except (KeyError, ValidationError, ValueError) as exc:
+            if claimed and event is not None:
+                await self.store.release_event_claim(event)
             await self._handle_failure(stream_id, fields, exc)
         except Exception as exc:
+            if claimed and event is not None:
+                await self.store.release_event_claim(event)
             await self._handle_failure(stream_id, fields, exc)
 
     async def _reject(
