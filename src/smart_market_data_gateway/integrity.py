@@ -156,6 +156,13 @@ async def verify_accepted_event_chain(
         expected_sequence += 1
 
     event_count = expected_sequence - 1
+    quote_count = int(await connection.fetchval("SELECT COUNT(*) FROM quote_events"))
+    if quote_count != event_count:
+        raise IntegrityChainError(
+            "quote history count does not match the integrity chain: "
+            f"quotes={quote_count}, integrity_records={event_count}"
+        )
+
     head = await connection.fetchrow(
         """
         SELECT chain_sequence, record_hash
