@@ -1,4 +1,13 @@
-CREATE EXTENSION IF NOT EXISTS timescaledb;
+-- Authoritative schema for the trusted temporal market-data foundation.
+-- Applied in order by `smdg-migrate`; runtime workers only verify this schema.
+
+DO $$
+BEGIN
+    CREATE EXTENSION IF NOT EXISTS timescaledb;
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'timescaledb unavailable; using plain PostgreSQL tables';
+END
+$$;
 
 CREATE TABLE IF NOT EXISTS quote_events (
     event_id UUID NOT NULL,
@@ -16,20 +25,27 @@ CREATE TABLE IF NOT EXISTS quote_events (
     gap_detected BOOLEAN NOT NULL,
     normalization_version TEXT NOT NULL,
     source_stream_id TEXT,
+    source_stream_ms BIGINT,
+    source_stream_sequence BIGINT,
     payload JSONB NOT NULL,
     persisted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (event_id, provider_timestamp)
-);
-SELECT create_hypertable(
-    'quote_events',
-    'provider_timestamp',
-    if_not_exists => TRUE,
-    migrate_data => TRUE
+    PRIMARY KEY (event_id, provider_timestamp),
+    CHECK (
+        (source_stream_ms IS NULL AND source_stream_sequence IS NULL)
+        OR (source_stream_ms >= 0 AND source_stream_sequence >= 0)
+    )
 );
 CREATE INDEX IF NOT EXISTS quote_events_symbol_time_idx
     ON quote_events (symbol, provider_timestamp DESC);
 CREATE INDEX IF NOT EXISTS quote_events_provider_time_idx
     ON quote_events (provider, provider_timestamp DESC);
+CREATE INDEX IF NOT EXISTS quote_events_replay_order_idx
+    ON quote_events (
+        source_stream_ms NULLS LAST,
+        source_stream_sequence NULLS LAST,
+        accepted_at,
+        event_id
+    );
 
 CREATE TABLE IF NOT EXISTS accepted_event_integrity (
     chain_name TEXT NOT NULL,
@@ -98,12 +114,6 @@ CREATE TABLE IF NOT EXISTS candles (
     persisted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (symbol, interval_seconds, bucket_start)
 );
-SELECT create_hypertable(
-    'candles',
-    'bucket_start',
-    if_not_exists => TRUE,
-    migrate_data => TRUE
-);
 CREATE INDEX IF NOT EXISTS candles_symbol_interval_time_idx
     ON candles (symbol, interval_seconds, bucket_start DESC);
 
@@ -115,12 +125,6 @@ CREATE TABLE IF NOT EXISTS late_quote_events (
     payload JSONB NOT NULL,
     observed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (event_id, provider_timestamp, interval_seconds)
-);
-SELECT create_hypertable(
-    'late_quote_events',
-    'provider_timestamp',
-    if_not_exists => TRUE,
-    migrate_data => TRUE
 );
 
 CREATE TABLE IF NOT EXISTS data_quality_intervals (
@@ -147,7 +151,30 @@ CREATE TABLE IF NOT EXISTS market_sessions (
     CHECK (closes_at > opens_at)
 );
 
--- Retention is intentionally opt-in. Enable SMDG_ENABLE_HISTORY_RETENTION only
--- after licensing, replay, backup, and audit requirements are agreed.
--- The integrity ledger is not a hypertable and must not be covered by market-data
--- retention: deleting it would destroy tamper-evidence for the remaining history.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb') THEN
+        PERFORM create_hypertable(
+            'quote_events',
+            'provider_timestamp',
+            if_not_exists => TRUE,
+            migrate_data => TRUE
+        );
+        PERFORM create_hypertable(
+            'candles',
+            'bucket_start',
+            if_not_exists => TRUE,
+            migrate_data => TRUE
+        );
+        PERFORM create_hypertable(
+            'late_quote_events',
+            'provider_timestamp',
+            if_not_exists => TRUE,
+            migrate_data => TRUE
+        );
+    END IF;
+END
+$$;
+
+-- Retention is intentionally opt-in and managed reversibly by the history worker.
+-- Integrity records are never covered by market-data retention policies.
