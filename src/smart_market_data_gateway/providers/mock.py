@@ -19,14 +19,20 @@ class MockProviderConfig:
     interval_seconds: float = 0.25
     duplicate_every: int | None = None
     fail_after_events: int | None = None
+    gap_every: int | None = None
+    out_of_order_every: int | None = None
 
     def __post_init__(self) -> None:
         if self.interval_seconds <= 0:
             raise ValueError("interval_seconds must be positive")
-        if self.duplicate_every is not None and self.duplicate_every <= 0:
-            raise ValueError("duplicate_every must be positive")
-        if self.fail_after_events is not None and self.fail_after_events <= 0:
-            raise ValueError("fail_after_events must be positive")
+        for name, value in (
+            ("duplicate_every", self.duplicate_every),
+            ("fail_after_events", self.fail_after_events),
+            ("gap_every", self.gap_every),
+            ("out_of_order_every", self.out_of_order_every),
+        ):
+            if value is not None and value <= 0:
+                raise ValueError(f"{name} must be positive")
 
 
 class MockMarketDataProvider(MarketDataProvider):
@@ -53,6 +59,7 @@ class MockMarketDataProvider(MarketDataProvider):
                 return
             self._state = ProviderState.CONNECTING
             self._message = None
+            self._events_emitted = 0
             self._task = asyncio.create_task(self._run(), name="mock-market-data-provider")
             self._state = ProviderState.CONNECTED
 
@@ -85,17 +92,14 @@ class MockMarketDataProvider(MarketDataProvider):
 
     async def events(self) -> AsyncIterator[QuoteEvent]:
         timeout_seconds = max(self._config.interval_seconds * 2, 0.05)
-
         while True:
             task = self._task
             if (task is None or task.done()) and self._queue.empty():
                 return
-
             try:
                 event = await asyncio.wait_for(self._queue.get(), timeout=timeout_seconds)
             except TimeoutError:
                 continue
-
             yield event
 
     async def _run(self) -> None:
@@ -105,9 +109,9 @@ class MockMarketDataProvider(MarketDataProvider):
                     symbols = sorted(self._symbols)
 
                 for symbol in symbols:
-                    event = self._next_event(symbol)
-                    await self._queue.put(event)
                     self._events_emitted += 1
+                    event = self._next_event(symbol, self._events_emitted)
+                    await self._queue.put(event)
 
                     duplicate_every = self._config.duplicate_every
                     if duplicate_every and self._events_emitted % duplicate_every == 0:
@@ -124,14 +128,27 @@ class MockMarketDataProvider(MarketDataProvider):
             self._state = ProviderState.DEGRADED
             self._message = str(exc)
 
-    def _next_event(self, symbol: str) -> QuoteEvent:
+    def _next_event(self, symbol: str, emission_number: int) -> QuoteEvent:
         sequence = self._sequence_by_symbol[symbol] + 1
+        if self._config.gap_every and emission_number % self._config.gap_every == 0:
+            sequence += 1
         self._sequence_by_symbol[symbol] = sequence
+
+        emitted_sequence = sequence
+        if (
+            self._config.out_of_order_every
+            and emission_number % self._config.out_of_order_every == 0
+            and sequence > 1
+        ):
+            emitted_sequence = sequence - 1
 
         base = Decimal(50 + sum(symbol.encode("utf-8")) % 200)
         price = base + Decimal(sequence % 20) / Decimal("100")
         now = datetime.now(UTC)
-        event_id = uuid5(NAMESPACE_URL, f"{self.name}:{symbol}:{sequence}")
+        event_id = uuid5(
+            NAMESPACE_URL,
+            f"{self.name}:{symbol}:{emitted_sequence}:{emission_number}",
+        )
 
         return QuoteEvent(
             event_id=event_id,
@@ -141,7 +158,7 @@ class MockMarketDataProvider(MarketDataProvider):
             ask=price + Decimal("0.01"),
             provider_timestamp=now,
             received_at=now,
-            sequence=sequence,
+            sequence=emitted_sequence,
             provider=self.name,
         )
 
