@@ -1,0 +1,25 @@
+{
+  "rest": {
+    "/health/live": ["get"],
+    "/health/ready": ["get"],
+    "/v1/quotes/{symbol}": ["get"],
+    "/v1/quotes": ["get"]
+  },
+  "schemas": {
+    "HTTPValidationError": ["detail"],
+    "ValidationError": ["loc", "msg", "type"]
+  },
+  "websocket": {
+    "address": "/v1/stream",
+    "client_actions": ["subscribe", "unsubscribe", "ping"],
+    "server_message_types": [
+      "connected",
+      "ack",
+      "snapshot",
+      "quote",
+      "heartbeat",
+      "warning",
+      "error"
+    ]
+  }
+}

@@ -1,0 +1,109 @@
+asyncapi: 3.0.0
+info:
+  title: Smart Market Data Gateway WebSocket API
+  version: 1.0.0
+  description: Shared WebSocket contract for web, mobile, and external API clients.
+servers:
+  local:
+    host: localhost:8000
+    protocol: ws
+channels:
+  marketStream:
+    address: /v1/stream
+    messages:
+      subscribeCommand:
+        $ref: '#/components/messages/SubscribeCommand'
+      unsubscribeCommand:
+        $ref: '#/components/messages/UnsubscribeCommand'
+      pingCommand:
+        $ref: '#/components/messages/PingCommand'
+      serverMessage:
+        $ref: '#/components/messages/ServerMessage'
+operations:
+  receiveCommands:
+    action: receive
+    channel:
+      $ref: '#/channels/marketStream'
+    messages:
+      - $ref: '#/channels/marketStream/messages/subscribeCommand'
+      - $ref: '#/channels/marketStream/messages/unsubscribeCommand'
+      - $ref: '#/channels/marketStream/messages/pingCommand'
+  sendEvents:
+    action: send
+    channel:
+      $ref: '#/channels/marketStream'
+    messages:
+      - $ref: '#/channels/marketStream/messages/serverMessage'
+components:
+  messages:
+    SubscribeCommand:
+      payload:
+        type: object
+        additionalProperties: false
+        required: [action, symbols]
+        properties:
+          action:
+            const: subscribe
+          symbols:
+            type: array
+            minItems: 1
+            maxItems: 500
+            uniqueItems: true
+            items:
+              type: string
+              pattern: '^[A-Z0-9._:-]{1,32}$'
+          channels:
+            type: array
+            items:
+              type: string
+            default: [quote]
+          request_id:
+            type: string
+    UnsubscribeCommand:
+      payload:
+        type: object
+        additionalProperties: false
+        required: [action, symbols]
+        properties:
+          action:
+            const: unsubscribe
+          symbols:
+            type: array
+            minItems: 1
+            maxItems: 500
+            uniqueItems: true
+            items:
+              type: string
+              pattern: '^[A-Z0-9._:-]{1,32}$'
+          channels:
+            type: array
+            items:
+              type: string
+            default: [quote]
+          request_id:
+            type: string
+    PingCommand:
+      payload:
+        type: object
+        additionalProperties: false
+        required: [action]
+        properties:
+          action:
+            const: ping
+          request_id:
+            type: string
+    ServerMessage:
+      payload:
+        type: object
+        required: [type, timestamp, data]
+        properties:
+          type:
+            type: string
+            enum: [connected, ack, snapshot, quote, heartbeat, warning, error]
+          timestamp:
+            type: string
+            format: date-time
+          request_id:
+            type: [string, 'null']
+          data:
+            type: object

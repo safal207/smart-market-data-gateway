@@ -13,15 +13,37 @@ services:
       retries: 10
       start_period: 3s
 
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: smdg
+      POSTGRES_USER: smdg
+      POSTGRES_PASSWORD: smdg-local-only
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U smdg -d smdg"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   api:
     build: .
-    environment:
+    environment: &gateway-environment
       SMDG_REDIS_URL: redis://redis:6379/0
+      SMDG_DATABASE_URL: postgresql://smdg:smdg-local-only@postgres:5432/smdg
       SMDG_ENVIRONMENT: development
+      SMDG_ALLOW_DEV_TOKENS: "true"
+      SMDG_ALLOW_ANONYMOUS_DEV: "true"
+      SMDG_LOG_LEVEL: INFO
     ports:
       - "8000:8000"
     depends_on:
       redis:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     healthcheck:
       test:
@@ -33,8 +55,66 @@ services:
         ]
       interval: 10s
       timeout: 5s
-      retries: 5
-      start_period: 10s
+      retries: 10
+      start_period: 15s
+
+  collector:
+    build: .
+    command: ["python", "-m", "smart_market_data_gateway.collector"]
+    environment:
+      <<: *gateway-environment
+      SMDG_COLLECTOR_METRICS_PORT: "9101"
+      SMDG_MOCK_SYMBOLS: AAPL,TSLA,NVDA,MSFT,GOOG,AMZN,META,AMD,INTC,ORCL
+      SMDG_MOCK_INTERVAL_SECONDS: "0.1"
+    expose:
+      - "9101"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  usage-writer:
+    build: .
+    command: ["python", "-m", "smart_market_data_gateway.usage_sink"]
+    environment:
+      <<: *gateway-environment
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      api:
+        condition: service_healthy
+      collector:
+        condition: service_started
+
+  grafana:
+    image: grafana/grafana:12.1.0
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
 
 volumes:
   redis-data:
+  postgres-data:
+  grafana-data:

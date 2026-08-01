@@ -1,0 +1,109 @@
+{
+  "annotations": {"list": []},
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 0, "y": 0},
+      "id": 1,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"expr": "smdg_active_websocket_connections", "refId": "A"}],
+      "title": "Active connections",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 6, "y": 0},
+      "id": 2,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"expr": "smdg_client_subscriptions", "refId": "A"}],
+      "title": "Client subscriptions",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 12, "y": 0},
+      "id": 3,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"expr": "smdg_unique_upstream_subscriptions", "refId": "A"}],
+      "title": "Unique upstream subscriptions",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "percentunit"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 18, "y": 0},
+      "id": 4,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"expr": "1 - (smdg_unique_upstream_subscriptions / clamp_min(smdg_client_subscriptions, 1))", "refId": "A"}],
+      "title": "Subscription reduction",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 5},
+      "id": 5,
+      "options": {"legend": {"calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "single", "sort": "none"}},
+      "targets": [
+        {"expr": "sum(rate(smdg_provider_events_total[1m]))", "legendFormat": "provider events/s", "refId": "A"},
+        {"expr": "sum by (tier) (rate(smdg_delivered_events_total[1m]))", "legendFormat": "delivered {{tier}}", "refId": "B"}
+      ],
+      "title": "Input versus delivered events",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 5},
+      "id": 6,
+      "options": {"legend": {"calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "single", "sort": "none"}},
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (le, tier) (rate(smdg_delivery_latency_seconds_bucket[5m])))", "legendFormat": "P95 {{tier}}", "refId": "A"}],
+      "title": "Delivery latency P95",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 13},
+      "id": 7,
+      "options": {"legend": {"calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "single", "sort": "none"}},
+      "targets": [
+        {"expr": "sum by (tier) (rate(smdg_coalesced_quote_events_total[1m]))", "legendFormat": "coalesced {{tier}}", "refId": "A"},
+        {"expr": "rate(smdg_deduplicated_events_total[1m])", "legendFormat": "deduplicated", "refId": "B"}
+      ],
+      "title": "Coalescing and deduplication",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 13},
+      "id": 8,
+      "options": {"legend": {"calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "single", "sort": "none"}},
+      "targets": [
+        {"expr": "smdg_redis_pending_entries", "legendFormat": "pending", "refId": "A"},
+        {"expr": "sum(smdg_delivery_queue_depth)", "legendFormat": "queue depth", "refId": "B"}
+      ],
+      "title": "Backpressure and Redis lag",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "5s",
+  "schemaVersion": 41,
+  "tags": ["market-data", "websocket", "redis", "qos"],
+  "templating": {"list": []},
+  "time": {"from": "now-30m", "to": "now"},
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Smart Market Data Gateway",
+  "uid": "smdg-overview",
+  "version": 1
+}
