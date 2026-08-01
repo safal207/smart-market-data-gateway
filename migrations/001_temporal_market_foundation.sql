@@ -154,24 +154,9 @@ CREATE TABLE IF NOT EXISTS market_sessions (
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb') THEN
-        PERFORM create_hypertable(
-            'quote_events',
-            'provider_timestamp',
-            if_not_exists => TRUE,
-            migrate_data => TRUE
-        );
-        PERFORM create_hypertable(
-            'candles',
-            'bucket_start',
-            if_not_exists => TRUE,
-            migrate_data => TRUE
-        );
-        PERFORM create_hypertable(
-            'late_quote_events',
-            'provider_timestamp',
-            if_not_exists => TRUE,
-            migrate_data => TRUE
-        );
+        EXECUTE 'SELECT create_hypertable(''quote_events'', ''provider_timestamp'', if_not_exists => TRUE, migrate_data => TRUE)';
+        EXECUTE 'SELECT create_hypertable(''candles'', ''bucket_start'', if_not_exists => TRUE, migrate_data => TRUE)';
+        EXECUTE 'SELECT create_hypertable(''late_quote_events'', ''provider_timestamp'', if_not_exists => TRUE, migrate_data => TRUE)';
     END IF;
 END
 $$;
