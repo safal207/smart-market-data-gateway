@@ -16,6 +16,7 @@ class BenchmarkScenario:
     symbol_universe: int = 500
     events_per_symbol: int = 100
     provider_events_per_second: int = 10
+    quote_payload_bytes: int = 256
     seed: int = 207
 
 
@@ -25,6 +26,7 @@ class BenchmarkResult:
     provider_subscriptions: int
     provider_events: int
     delivered_events: int
+    egress_payload_bytes: int
     elapsed_seconds: float
     cpu_seconds: float
     peak_memory_bytes: int
@@ -42,11 +44,7 @@ def _percentile(values: list[float], percentile: float) -> float:
 
 def _build_clients(scenario: BenchmarkScenario) -> list[tuple[str, tuple[int, ...]]]:
     rng = random.Random(scenario.seed)
-    tiers = (
-        ["basic"] * 70
-        + ["pro"] * 25
-        + ["premium"] * 5
-    )
+    tiers = ["basic"] * 70 + ["pro"] * 25 + ["premium"] * 5
     population = list(range(scenario.symbol_universe))
     weights = [1.0 / (index + 1) ** 0.8 for index in population]
     clients: list[tuple[str, tuple[int, ...]]] = []
@@ -71,9 +69,7 @@ def _run_mode(
             subscribers.setdefault(symbol, []).append(tier)
 
     provider_subscriptions = (
-        len(subscribers)
-        if optimized
-        else sum(len(symbols) for _tier, symbols in clients)
+        len(subscribers) if optimized else sum(len(symbols) for _tier, symbols in clients)
     )
     provider_events = len(subscribers) * scenario.events_per_symbol
     delivered = 0
@@ -114,6 +110,7 @@ def _run_mode(
         provider_subscriptions=provider_subscriptions,
         provider_events=provider_events,
         delivered_events=delivered,
+        egress_payload_bytes=delivered * scenario.quote_payload_bytes,
         elapsed_seconds=elapsed,
         cpu_seconds=cpu_seconds,
         peak_memory_bytes=peak,
@@ -143,6 +140,10 @@ def run_benchmark(scenario: BenchmarkScenario) -> dict[str, Any]:
                 baseline.delivered_events,
                 smart.delivered_events,
             ),
+            "egress_payload_reduction_percent": savings(
+                baseline.egress_payload_bytes,
+                smart.egress_payload_bytes,
+            ),
             "cpu_reduction_percent": savings(baseline.cpu_seconds, smart.cpu_seconds),
             "peak_memory_reduction_percent": savings(
                 baseline.peak_memory_bytes,
@@ -151,6 +152,7 @@ def run_benchmark(scenario: BenchmarkScenario) -> dict[str, Any]:
         },
         "limitations": [
             "This benchmark measures deterministic in-process routing work, not exchange latency.",
+            "Egress bytes represent serialized payload bytes and exclude TCP, TLS, and WebSocket framing.",
             "Node-count and cost conclusions require a deployed network benchmark.",
             "Real-provider results depend on licensing, rate limits, payload shape, and market activity.",
         ],
@@ -176,6 +178,7 @@ def _markdown(result: dict[str, Any]) -> str:
 | Provider subscriptions | {baseline['provider_subscriptions']:,} | {smart['provider_subscriptions']:,} |
 | Provider events | {baseline['provider_events']:,} | {smart['provider_events']:,} |
 | Delivered events | {baseline['delivered_events']:,} | {smart['delivered_events']:,} |
+| Egress payload bytes | {baseline['egress_payload_bytes']:,} | {smart['egress_payload_bytes']:,} |
 | CPU seconds | {baseline['cpu_seconds']:.4f} | {smart['cpu_seconds']:.4f} |
 | Peak memory bytes | {baseline['peak_memory_bytes']:,} | {smart['peak_memory_bytes']:,} |
 | P95 processing, μs | {baseline['p95_processing_us']:.2f} | {smart['p95_processing_us']:.2f} |
@@ -184,6 +187,7 @@ def _markdown(result: dict[str, Any]) -> str:
 
 - Provider subscription reduction: {comparison['provider_subscription_reduction_percent']:.2f}%
 - Delivered event reduction: {comparison['delivered_event_reduction_percent']:.2f}%
+- Egress payload reduction: {comparison['egress_payload_reduction_percent']:.2f}%
 - CPU reduction in this run: {comparison['cpu_reduction_percent']:.2f}%
 - Peak-memory reduction in this run: {comparison['peak_memory_reduction_percent']:.2f}%
 
@@ -199,6 +203,7 @@ def main() -> None:
     parser.add_argument("--symbol-universe", type=int, default=500)
     parser.add_argument("--events-per-symbol", type=int, default=100)
     parser.add_argument("--provider-events-per-second", type=int, default=10)
+    parser.add_argument("--quote-payload-bytes", type=int, default=256)
     parser.add_argument("--seed", type=int, default=207)
     parser.add_argument("--output", type=Path, default=Path("benchmark-results"))
     args = parser.parse_args()
@@ -209,6 +214,7 @@ def main() -> None:
         symbol_universe=args.symbol_universe,
         events_per_symbol=args.events_per_symbol,
         provider_events_per_second=args.provider_events_per_second,
+        quote_payload_bytes=args.quote_payload_bytes,
         seed=args.seed,
     )
     result = run_benchmark(scenario)
