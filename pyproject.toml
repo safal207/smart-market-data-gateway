@@ -39,6 +39,7 @@ dev = [
 [project.scripts]
 smdg-benchmark = "smart_market_data_gateway.benchmark:main"
 smdg-collector = "smart_market_data_gateway.collector:main"
+smdg-usage-sink = "smart_market_data_gateway.usage_sink:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/smart_market_data_gateway"]
