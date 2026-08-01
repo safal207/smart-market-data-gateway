@@ -72,6 +72,19 @@ class GatewayMetrics:
             ["provider"],
             registry=self.registry,
         )
+        self.provider_connected = Gauge(
+            "smdg_provider_connected",
+            "Whether a provider adapter is currently connected",
+            ["provider"],
+            registry=self.registry,
+        )
+        self.provider_outage_duration = Histogram(
+            "smdg_provider_outage_duration_seconds",
+            "Provider outage duration observed before reconnect",
+            ["provider"],
+            buckets=(0.1, 0.5, 1, 2, 5, 10, 30, 60, 300),
+            registry=self.registry,
+        )
         self.redis_pending_entries = Gauge(
             "smdg_redis_pending_entries",
             "Pending entries for the processing consumer group",
@@ -86,6 +99,11 @@ class GatewayMetrics:
         self.stale_quotes = Counter(
             "smdg_stale_quote_reads_total",
             "REST or snapshot reads that returned stale data",
+            registry=self.registry,
+        )
+        self.usage_queue_dropped = Counter(
+            "smdg_usage_queue_dropped_total",
+            "Usage events dropped because the asynchronous queue was full",
             registry=self.registry,
         )
 
