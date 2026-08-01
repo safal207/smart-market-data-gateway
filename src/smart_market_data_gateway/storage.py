@@ -171,26 +171,31 @@ class RedisStore:
         return result
 
     async def claim_event(self, event: QuoteEvent, source_stream_id: str) -> EventClaimStatus:
-        result = await self.redis.eval(
+        result = await self.redis.execute_command(
+            "EVAL",
             _CLAIM_EVENT_SCRIPT,
-            2,
+            "2",
             self._processed_key(event),
             self._claim_key(event),
             source_stream_id,
-            self.settings.event_claim_ttl_seconds,
+            str(self.settings.event_claim_ttl_seconds),
         )
-        status = str(result)
+        if isinstance(result, bytes):
+            status = result.decode()
+        else:
+            status = str(result)
         if status not in {"claimed", "processed", "busy"}:
             raise RuntimeError(f"unexpected event claim status: {status}")
         return cast(EventClaimStatus, status)
 
     async def mark_event_processed(self, event: QuoteEvent) -> None:
-        await self.redis.eval(
+        await self.redis.execute_command(
+            "EVAL",
             _MARK_EVENT_PROCESSED_SCRIPT,
-            2,
+            "2",
             self._processed_key(event),
             self._claim_key(event),
-            self.settings.dedupe_ttl_seconds,
+            str(self.settings.dedupe_ttl_seconds),
         )
 
     async def release_event_claim(self, event: QuoteEvent) -> None:
