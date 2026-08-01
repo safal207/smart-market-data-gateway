@@ -1,4 +1,6 @@
 import asyncio
+from datetime import UTC, datetime
+import json
 import logging
 from typing import Any
 from uuid import uuid4
@@ -34,8 +36,10 @@ class QuoteProcessor:
                     self.consumer_name,
                 )
                 if not messages:
+                    messages = await self._claim_stale()
                     self.metrics.redis_pending_entries.set(await self.store.pending_count())
-                    continue
+                    if not messages:
+                        continue
                 for stream_id, fields in messages:
                     await self._process_one(stream_id, fields)
             except asyncio.CancelledError:
@@ -43,6 +47,21 @@ class QuoteProcessor:
             except Exception:
                 logger.exception("quote processor loop failed", extra={"event": "processor_failed"})
                 await asyncio.sleep(0.5)
+
+    async def _claim_stale(self) -> list[tuple[str, dict[str, str]]]:
+        claimed = await self.store.redis.xautoclaim(
+            self.settings.quote_stream,
+            self.settings.stream_group,
+            self.consumer_name,
+            min_idle_time=max(5_000, int(self.settings.heartbeat_seconds * 2000)),
+            start_id="0-0",
+            count=100,
+        )
+        entries = claimed[1] if isinstance(claimed, (list, tuple)) and len(claimed) > 1 else []
+        result: list[tuple[str, dict[str, str]]] = []
+        for stream_id, fields in entries:
+            result.append((str(stream_id), {str(key): str(value) for key, value in fields.items()}))
+        return result
 
     async def _process_one(self, stream_id: str, fields: dict[str, str]) -> None:
         try:
@@ -61,6 +80,20 @@ class QuoteProcessor:
             if observation is not None:
                 kind = "out_of_order" if observation.out_of_order else "gap"
                 self.metrics.gap_events.labels(kind).inc()
+                await self.store.redis.set(
+                    f"smdg:stream-health:{event.provider}:{event.symbol}",
+                    json.dumps(
+                        {
+                            "status": "degraded",
+                            "kind": kind,
+                            "previous_sequence": observation.previous_sequence,
+                            "current_sequence": observation.current_sequence,
+                            "gap": observation.gap,
+                            "observed_at": datetime.now(UTC).isoformat(),
+                        }
+                    ),
+                    ex=300,
+                )
                 logger.warning(
                     "sequence anomaly",
                     extra={
