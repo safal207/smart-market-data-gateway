@@ -1,3 +1,4 @@
+import json
 import os
 
 from smart_market_data_gateway.storage import RedisStore
@@ -44,6 +45,7 @@ async def test_usage_sink_persists_idempotently_to_postgres(
     assert row["client_id"] == "client-1"
     assert row["event_type"] == "premium_quote"
     assert row["quantity"] == 3
-    assert row["metadata"]["symbols"] == ["AAPL", "TSLA", "NVDA"]
+    metadata = json.loads(row["metadata"])
+    assert metadata["symbols"] == ["AAPL", "TSLA", "NVDA"]
 
     await sink.close()
