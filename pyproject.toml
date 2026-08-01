@@ -40,6 +40,7 @@ dev = [
 smdg-benchmark = "smart_market_data_gateway.benchmark:main"
 smdg-collector = "smart_market_data_gateway.collector:main"
 smdg-history-sink = "smart_market_data_gateway.history:main"
+smdg-migrate = "smart_market_data_gateway.migrations:main"
 smdg-replay = "smart_market_data_gateway.replay:main"
 smdg-usage-sink = "smart_market_data_gateway.usage_sink:main"
 smdg-verify-history = "smart_market_data_gateway.integrity:main"
