@@ -62,6 +62,16 @@ services:
       retries: 10
       start_period: 15s
 
+  migrate:
+    build: .
+    command: ["smdg-migrate", "--migrations-dir", "/app/migrations"]
+    environment:
+      <<: *gateway-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
   collector:
     build: .
     command: ["python", "-m", "smart_market_data_gateway.collector"]
@@ -85,8 +95,8 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   usage-writer:
