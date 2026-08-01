@@ -9,7 +9,13 @@ from redis.asyncio.client import PubSub
 from redis.exceptions import ResponseError
 
 from smart_market_data_gateway.config import Settings
-from smart_market_data_gateway.domain import GapObservation, QuoteEvent, QuoteSnapshot
+from smart_market_data_gateway.domain import (
+    AcceptedQuoteEvent,
+    GapObservation,
+    QuoteEvent,
+    QuoteSnapshot,
+    RejectedQuoteEvent,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -19,22 +25,56 @@ class RedisStore:
         self.redis = redis
         self.settings = settings
 
+    async def ensure_group(self, stream: str, group: str) -> None:
+        try:
+            await self.redis.xgroup_create(stream, group, id="0", mkstream=True)
+        except ResponseError as exc:
+            if "BUSYGROUP" not in str(exc):
+                raise
+
     async def ensure_groups(self) -> None:
         for stream, group in (
             (self.settings.quote_stream, self.settings.stream_group),
             (self.settings.control_stream, self.settings.control_group),
         ):
-            try:
-                await self.redis.xgroup_create(stream, group, id="0", mkstream=True)
-            except ResponseError as exc:
-                if "BUSYGROUP" not in str(exc):
-                    raise
+            await self.ensure_group(stream, group)
 
     async def publish_quote(self, event: QuoteEvent) -> str:
         stream_id = await self.redis.xadd(
             self.settings.quote_stream,
             {"payload": event.model_dump_json()},
             maxlen=self.settings.stream_maxlen,
+            approximate=True,
+        )
+        return str(stream_id)
+
+    async def publish_accepted_event(self, accepted: AcceptedQuoteEvent) -> str:
+        stream_id = await self.redis.xadd(
+            self.settings.accepted_event_stream,
+            {
+                "payload": accepted.model_dump_json(),
+                "event_id": str(accepted.event.event_id),
+                "symbol": accepted.event.symbol,
+                "event_time": accepted.event.provider_timestamp.isoformat(),
+                "accepted_at": accepted.quality.accepted_at.isoformat(),
+                "quality_score": str(accepted.quality.score),
+            },
+            maxlen=self.settings.accepted_stream_maxlen,
+            approximate=True,
+        )
+        return str(stream_id)
+
+    async def publish_rejected_event(self, rejected: RejectedQuoteEvent) -> str:
+        stream_id = await self.redis.xadd(
+            self.settings.rejected_event_stream,
+            {
+                "payload": rejected.model_dump_json(),
+                "event_id": str(rejected.event.event_id),
+                "symbol": rejected.event.symbol,
+                "reason": rejected.reason.value,
+                "rejected_at": rejected.rejected_at.isoformat(),
+            },
+            maxlen=self.settings.rejected_stream_maxlen,
             approximate=True,
         )
         return str(stream_id)
