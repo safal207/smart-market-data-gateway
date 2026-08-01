@@ -30,17 +30,53 @@ Unified REST + WebSocket Gateway
  Web / Mobile / External API clients
 ```
 
-## MVP
+## Current foundation
 
-The MVP will include a mock market-data provider, normalized quote events, Redis-based delivery and caching, subscription aggregation, REST and WebSocket endpoints, tiered QoS, authentication, slow-consumer protection, observability, and a reproducible before/after load benchmark.
+The first implementation slice contains:
+
+- a FastAPI application with liveness and Redis readiness endpoints;
+- a versioned, provider-independent quote event model;
+- a vendor-neutral `MarketDataProvider` interface;
+- a deterministic mock provider with duplicate and failure simulation;
+- Redis and API containers in Docker Compose;
+- C4 System Context and Container documentation;
+- unit tests and CI checks.
+
+## Run locally
+
+```bash
+# Start Redis and the API
+docker compose up --build
+
+# Liveness
+curl http://localhost:8000/health/live
+
+# Redis-backed readiness
+curl http://localhost:8000/health/ready
+
+# OpenAPI
+open http://localhost:8000/docs
+```
+
+For local Python development:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+pytest
+ruff check .
+```
 
 ## Documentation
 
 - [Product backlog and roadmap](docs/backlog.md)
+- [C4 System Context](docs/architecture/context.md)
+- [C4 Container Diagram](docs/architecture/container.md)
 
 ## Status
 
-Initial product design and backlog preparation.
+Foundation implementation in progress. The next vertical slice connects the mock provider to Redis, adds the latest-quote cache, and exposes `GET /v1/quotes/{symbol}`.
 
 ## Important licensing note
 
