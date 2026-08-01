@@ -7,6 +7,12 @@ import asyncpg
 import pytest
 
 from smart_market_data_gateway.domain import AcceptedQuoteEvent, DataQualityMetadata, QuoteEvent
+from smart_market_data_gateway.durability import (
+    HistoryCrash,
+    HistoryFailpoint,
+    crash_if,
+    parse_history_failpoint,
+)
 from smart_market_data_gateway.history import HistorySink
 from smart_market_data_gateway.integrity import (
     IntegrityChainError,
@@ -83,6 +89,17 @@ def test_integrity_record_is_deterministic_and_chained() -> None:
     assert second.record_hash != first.record_hash
 
 
+def test_history_failpoints_are_stable_and_explicit() -> None:
+    point = HistoryFailpoint.AFTER_LEDGER_APPEND_BEFORE_COMMIT
+    assert parse_history_failpoint(None) is None
+    assert parse_history_failpoint("  ") is None
+    assert parse_history_failpoint(f" {point.value} ") == point
+    crash_if(None, point)
+    with pytest.raises(HistoryCrash) as raised:
+        crash_if(point, point)
+    assert raised.value.point == point
+
+
 async def test_integrity_chain_verifies_and_detects_payload_tampering(
     redis_client,
     test_settings,
@@ -119,6 +136,65 @@ async def test_integrity_chain_verifies_and_detects_payload_tampering(
             first.event.provider_timestamp,
         )
         with pytest.raises(IntegrityChainError, match="payload digest mismatch"):
+            await verify_accepted_event_chain(connection)
+
+    await sink.close()
+
+
+async def test_integrity_chain_rejects_quote_without_integrity_record(
+    redis_client,
+    test_settings,
+) -> None:
+    config = test_settings.model_copy(
+        update={
+            "database_url": history_database_url(),
+            "enable_history_retention": False,
+        }
+    )
+    sink = HistorySink(redis_client, config)
+    await sink.start()
+    assert sink.pool is not None
+
+    chained = accepted_event(3, datetime(2026, 8, 1, 12, 0, tzinfo=UTC), "100")
+    unchained = accepted_event(4, datetime(2026, 8, 1, 12, 0, 1, tzinfo=UTC), "101")
+    async with sink.pool.acquire() as connection:
+        await reset_history_tables(connection)
+        async with connection.transaction():
+            await sink._insert_event(connection, chained)
+        event = unchained.event
+        await connection.execute(
+            """
+            INSERT INTO quote_events (
+                event_id, provider_timestamp, received_at, accepted_at, data_cutoff,
+                symbol, provider, sequence, price, bid, ask, quality_score,
+                gap_detected, normalization_version, source_stream_id, payload
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                $13, $14, $15, $16::jsonb
+            )
+            """,
+            event.event_id,
+            event.provider_timestamp,
+            event.received_at,
+            unchained.quality.accepted_at,
+            unchained.data_cutoff,
+            event.symbol,
+            event.provider,
+            event.sequence,
+            event.price,
+            event.bid,
+            event.ask,
+            unchained.quality.score,
+            unchained.quality.gap_detected,
+            unchained.quality.normalization_version,
+            unchained.source_stream_id,
+            unchained.model_dump_json(),
+        )
+        with pytest.raises(
+            IntegrityChainError,
+            match="quote history count does not match the integrity chain",
+        ):
             await verify_accepted_event_chain(connection)
 
     await sink.close()
