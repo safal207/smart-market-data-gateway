@@ -73,8 +73,7 @@ class QuoteProcessor:
         try:
             payload = fields["payload"]
             event = QuoteEvent.model_validate_json(payload)
-            first_claim = await self.store.accept_event_once(event)
-            if not first_claim and await self.store.is_event_processed(event):
+            if not await self.store.accept_event_once(event):
                 self.metrics.deduplicated_events.inc()
                 await self._reject(event, stream_id, QuoteRejectionReason.DUPLICATE)
                 await self._ack(stream_id)
@@ -91,7 +90,6 @@ class QuoteProcessor:
                     QuoteRejectionReason.STALE,
                     detail=f"feed age {feed_age_seconds:.3f}s exceeds accepted limit",
                 )
-                await self.store.mark_event_processed(event)
                 await self._ack(stream_id)
                 return
 
@@ -132,7 +130,6 @@ class QuoteProcessor:
                             f"{observation.previous_sequence}"
                         ),
                     )
-                    await self.store.mark_event_processed(event)
                     await self._ack(stream_id)
                     return
 
@@ -158,7 +155,6 @@ class QuoteProcessor:
             await self.store.publish_accepted_event(accepted)
             await self.store.cache_quote(event)
             await self.store.publish_fanout(event)
-            await self.store.mark_event_processed(event)
             self.metrics.provider_events.labels(event.provider).inc()
             await self._ack(stream_id)
         except (KeyError, ValidationError, ValueError) as exc:
