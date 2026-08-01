@@ -85,7 +85,10 @@ class Settings(BaseSettings):
     subscription_grace_seconds: float = 3.0
     subscription_ttl_seconds: int = 60
     heartbeat_seconds: float = 15.0
+    client_idle_timeout_seconds: float = 45.0
     websocket_queue_size: int = 512
+    coalescing_warning_threshold: int = 100
+    usage_queue_size: int = 10_000
     entitlement_cache_ttl_seconds: int = 30
     shutdown_timeout_seconds: float = 10.0
 
