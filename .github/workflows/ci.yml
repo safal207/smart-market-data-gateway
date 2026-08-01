@@ -64,8 +64,10 @@ jobs:
       - name: Unit, integration, and contract tests
         run: pytest
 
-      - name: Validate replay CLI
-        run: smdg-replay --help >/dev/null
+      - name: Validate replay and integrity CLIs
+        run: |
+          smdg-replay --help >/dev/null
+          smdg-verify-history --help >/dev/null
 
       - name: Validate OpenAPI and AsyncAPI
         run: |
