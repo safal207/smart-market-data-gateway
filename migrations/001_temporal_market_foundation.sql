@@ -31,6 +31,42 @@ CREATE INDEX IF NOT EXISTS quote_events_symbol_time_idx
 CREATE INDEX IF NOT EXISTS quote_events_provider_time_idx
     ON quote_events (provider, provider_timestamp DESC);
 
+CREATE TABLE IF NOT EXISTS accepted_event_integrity (
+    chain_name TEXT NOT NULL,
+    chain_sequence BIGINT NOT NULL CHECK (chain_sequence > 0),
+    profile TEXT NOT NULL,
+    event_id UUID NOT NULL,
+    provider_timestamp TIMESTAMPTZ NOT NULL,
+    source_stream_id TEXT,
+    payload_digest TEXT NOT NULL CHECK (payload_digest ~ '^sha256:[0-9a-f]{64}$'),
+    previous_record_hash TEXT CHECK (
+        previous_record_hash IS NULL OR previous_record_hash ~ '^sha256:[0-9a-f]{64}$'
+    ),
+    record_hash TEXT NOT NULL CHECK (record_hash ~ '^sha256:[0-9a-f]{64}$'),
+    appended_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (chain_name, chain_sequence),
+    UNIQUE (chain_name, event_id, provider_timestamp),
+    UNIQUE (chain_name, record_hash)
+);
+CREATE INDEX IF NOT EXISTS accepted_event_integrity_event_idx
+    ON accepted_event_integrity (event_id, provider_timestamp);
+
+CREATE TABLE IF NOT EXISTS integrity_chain_heads (
+    chain_name TEXT PRIMARY KEY,
+    chain_sequence BIGINT NOT NULL DEFAULT 0 CHECK (chain_sequence >= 0),
+    record_hash TEXT CHECK (
+        record_hash IS NULL OR record_hash ~ '^sha256:[0-9a-f]{64}$'
+    ),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CHECK (
+        (chain_sequence = 0 AND record_hash IS NULL)
+        OR (chain_sequence > 0 AND record_hash IS NOT NULL)
+    )
+);
+INSERT INTO integrity_chain_heads (chain_name)
+VALUES ('accepted_quotes')
+ON CONFLICT (chain_name) DO NOTHING;
+
 CREATE TABLE IF NOT EXISTS candles (
     symbol TEXT NOT NULL,
     interval_seconds INTEGER NOT NULL CHECK (interval_seconds > 0),
@@ -99,3 +135,5 @@ CREATE TABLE IF NOT EXISTS market_sessions (
 
 -- Retention is intentionally opt-in. Enable SMDG_ENABLE_HISTORY_RETENTION only
 -- after licensing, replay, backup, and audit requirements are agreed.
+-- The integrity ledger is not a hypertable and must not be covered by market-data
+-- retention: deleting it would destroy tamper-evidence for the remaining history.
