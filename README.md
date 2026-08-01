@@ -2,7 +2,7 @@
 
 Adaptive market-data gateway that reduces duplicated work before adding infrastructure. It aggregates identical subscriptions, applies tier-based Quality of Service, protects healthy clients from slow consumers, and exposes one REST/WebSocket contract for web, mobile, and external API clients.
 
-The repository now also contains the trusted-data foundation for a future **Temporal Market Intelligence Graph**: an accepted-event stream, point-in-time quality metadata, deterministic server-side candles, TimescaleDB history, and replay. It does not yet claim predictive alpha or expose trading recommendations.
+The repository now also contains the trusted-data foundation for a future **Temporal Market Intelligence Graph**: an accepted-event stream, point-in-time quality metadata, deterministic server-side candles, TimescaleDB history, deterministic replay, and a tamper-evident accepted-event integrity chain. It does not yet claim predictive alpha or expose trading recommendations.
 
 ## Architecture
 
@@ -35,6 +35,7 @@ Web / Mobile / API clients
                     History worker
                           │
                           ├────────► TimescaleDB quote history
+                          ├────────► append-only integrity chain
                           ├────────► finalized server candles
                           └────────► late-event audit
 
@@ -78,6 +79,9 @@ History, candle construction, replay, future graph features, and future ML are o
 - stale and out-of-order events excluded from latest cache and accepted history;
 - gap events accepted with degraded quality and explicit audit metadata;
 - TimescaleDB-compatible `quote_events`, `candles`, and `late_quote_events` hypertables;
+- canonical SHA-256 digest for every accepted-event payload;
+- append-only previous-hash integrity chain committed with each quote in one transaction;
+- independent chain verifier that detects payload changes, gaps, broken links, and head mismatch;
 - deterministic quote-derived candles for 1 second, 10 seconds, 1 minute, and 5 minutes;
 - explicit `event_count` instead of invented exchange volume;
 - watermark-based lateness policy that does not silently rewrite finalized candles;
@@ -161,6 +165,16 @@ smdg-replay \
 
 Use a dedicated replay stream unless duplicate live downstream processing is intentional.
 
+## History integrity
+
+Verify the accepted-event payload digests, sequence, previous-hash links, and persisted chain head before replay or feature generation:
+
+```bash
+smdg-verify-history
+```
+
+A successful result is emitted as JSON. Any changed payload, missing record, sequence gap, broken link, profile mismatch, or incorrect head exits non-zero. This mechanism is tamper-evident; externally signed checkpoints are still required to resist a database administrator who can rewrite the complete chain.
+
 ## Development
 
 ```bash
@@ -207,6 +221,7 @@ The CI smoke benchmark uploads raw JSON and Markdown artifacts. No simulated res
 
 - [Temporal Market Intelligence Graph](docs/TEMPORAL_MARKET_INTELLIGENCE_GRAPH.md)
 - [Point-in-time consistency](docs/POINT_IN_TIME_CONSISTENCY.md)
+- [LiminalDB integrity alignment](docs/LIMINALDB_INTEGRITY_ALIGNMENT.md)
 - [Prediction outcome ledger](docs/PREDICTION_LEDGER.md)
 - [Evaluation protocol](docs/EVALUATION_PROTOCOL.md)
 - [Explainable Signal API](docs/SIGNAL_API.md)
