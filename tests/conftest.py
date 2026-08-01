@@ -1,10 +1,20 @@
+import asyncio
 import os
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
 from redis.asyncio import Redis
 
 from smart_market_data_gateway.config import Settings
+from smart_market_data_gateway.migrations import migrate
+
+
+@pytest.fixture(scope="session", autouse=True)
+def migrated_test_database() -> None:
+    database_url = os.getenv("TEST_DATABASE_URL")
+    if database_url:
+        asyncio.run(migrate(database_url, Path("migrations")))
 
 
 @pytest.fixture
