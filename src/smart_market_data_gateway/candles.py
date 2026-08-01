@@ -1,8 +1,11 @@
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from smart_market_data_gateway.domain import AcceptedQuoteEvent, Candle
+
+CandleKey = tuple[str, int, datetime]
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +83,16 @@ class _MutableCandle:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class CandleSymbolCheckpoint:
+    """Small rollback snapshot limited to one instrument."""
+
+    symbol: str
+    active: dict[CandleKey, _MutableCandle]
+    watermark: datetime | None
+    finalized_through: dict[int, datetime]
+
+
 class CandleBuilder:
     """Builds deterministic quote-derived candles with an explicit lateness watermark."""
 
@@ -96,7 +109,8 @@ class CandleBuilder:
             raise ValueError("allowed_lateness_seconds must be non-negative")
         self.intervals_seconds = intervals
         self.allowed_lateness = timedelta(seconds=allowed_lateness_seconds)
-        self._active: dict[tuple[str, int, datetime], _MutableCandle] = {}
+        self._active: dict[CandleKey, _MutableCandle] = {}
+        self._keys_by_symbol: dict[str, set[CandleKey]] = {}
         self._watermark_by_symbol: dict[str, datetime] = {}
         self._finalized_through: dict[tuple[str, int], datetime] = {}
 
@@ -121,6 +135,7 @@ class CandleBuilder:
             active_candle = self._active.get(key)
             if active_candle is None:
                 self._active[key] = _MutableCandle.from_event(accepted, interval)
+                self._keys_by_symbol.setdefault(event.symbol, set()).add(key)
             else:
                 active_candle.add(accepted)
 
@@ -130,31 +145,72 @@ class CandleBuilder:
             late_intervals=tuple(late_intervals),
         )
 
+    def checkpoint_symbol(self, symbol: str) -> CandleSymbolCheckpoint:
+        keys = self._keys_by_symbol.get(symbol, set())
+        active = {key: deepcopy(self._active[key]) for key in keys}
+        finalized_through = {
+            interval: value
+            for (candidate_symbol, interval), value in self._finalized_through.items()
+            if candidate_symbol == symbol
+        }
+        return CandleSymbolCheckpoint(
+            symbol=symbol,
+            active=active,
+            watermark=self._watermark_by_symbol.get(symbol),
+            finalized_through=finalized_through,
+        )
+
+    def restore_symbol(self, checkpoint: CandleSymbolCheckpoint) -> None:
+        symbol = checkpoint.symbol
+        for key in tuple(self._keys_by_symbol.get(symbol, set())):
+            self._active.pop(key, None)
+        if checkpoint.active:
+            self._active.update(deepcopy(checkpoint.active))
+            self._keys_by_symbol[symbol] = set(checkpoint.active)
+        else:
+            self._keys_by_symbol.pop(symbol, None)
+
+        if checkpoint.watermark is None:
+            self._watermark_by_symbol.pop(symbol, None)
+        else:
+            self._watermark_by_symbol[symbol] = checkpoint.watermark
+
+        for key in tuple(self._finalized_through):
+            if key[0] == symbol:
+                self._finalized_through.pop(key)
+        for interval, value in checkpoint.finalized_through.items():
+            self._finalized_through[(symbol, interval)] = value
+
     def flush(self) -> tuple[Candle, ...]:
         finalized = [candle.finalize() for candle in self._active.values()]
         finalized.sort(key=lambda item: (item.symbol, item.interval_seconds, item.bucket_start))
         self._active.clear()
+        self._keys_by_symbol.clear()
         for candle in finalized:
             self._finalized_through[(candle.symbol, candle.interval_seconds)] = candle.bucket_start
         return tuple(finalized)
 
     def _finalize_ready(self, symbol: str, watermark: datetime) -> list[Candle]:
-        ready_keys: list[tuple[str, int, datetime]] = []
-        for key, active_candle in self._active.items():
-            if active_candle.symbol != symbol:
-                continue
+        ready_keys: list[CandleKey] = []
+        for key in tuple(self._keys_by_symbol.get(symbol, set())):
+            active_candle = self._active[key]
             bucket_end = active_candle.bucket_start + timedelta(seconds=active_candle.interval_seconds)
             if bucket_end + self.allowed_lateness <= watermark:
                 ready_keys.append(key)
 
         ready_keys.sort(key=lambda item: (item[1], item[2]))
         finalized: list[Candle] = []
+        symbol_keys = self._keys_by_symbol.get(symbol)
         for key in ready_keys:
             finalized_candle = self._active.pop(key).finalize()
+            if symbol_keys is not None:
+                symbol_keys.discard(key)
             finalized.append(finalized_candle)
             self._finalized_through[
                 (finalized_candle.symbol, finalized_candle.interval_seconds)
             ] = finalized_candle.bucket_start
+        if symbol_keys is not None and not symbol_keys:
+            self._keys_by_symbol.pop(symbol, None)
         return finalized
 
 
