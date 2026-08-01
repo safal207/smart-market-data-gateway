@@ -9,7 +9,8 @@ Web / Mobile / API clients
           │ REST + WebSocket
           ▼
  FastAPI Gateway instances
-  ├─ JWT + entitlements + distributed rate limits
+  ├─ JWT/JWKS + entitlements
+  ├─ distributed token buckets and connection limits
   ├─ Redis-backed subscription registry
   ├─ bounded latest-value client buffers
   └─ Prometheus metrics + JSON logs
@@ -25,6 +26,11 @@ Web / Mobile / API clients
                          latest cache + Pub/Sub
                                   │
                                   └────────► every gateway instance
+
+REST / WebSocket usage events
+          │ bounded asynchronous queue
+          ▼
+ Redis usage stream ──► Usage writer ──► PostgreSQL audit records
 ```
 
 Redis Streams provide durable, acknowledged processing. Redis Pub/Sub broadcasts processed quotes to every gateway instance that owns local WebSocket sessions. Reconnecting clients receive the latest cached snapshot before live updates.
@@ -32,22 +38,23 @@ Redis Streams provide durable, acknowledged processing. Redis Pub/Sub broadcasts
 ## Implemented capabilities
 
 - vendor-neutral provider adapter and deterministic mock provider;
-- provider reconnect with capped exponential backoff and jitter;
-- Redis Streams, consumer groups, bounded retries, dead-letter stream, and deduplication;
-- sequence gap and out-of-order detection;
+- provider reconnect with capped exponential backoff, jitter, restored symbols, outage metrics, and alerts;
+- Redis Streams, consumer groups, stale-entry reclaim, bounded retries, dead-letter stream, and deduplication;
+- sequence gap and out-of-order detection with degraded-stream metadata;
 - distributed active-subscription registry with TTL and unsubscribe grace period;
 - one global upstream transition for identical client subscriptions;
-- REST endpoints for one or many latest quotes, including stale-data metadata;
-- authenticated WebSocket subscribe/unsubscribe without reconnecting;
-- Basic, Pro, and Premium symbol limits and update frequencies;
-- optional Client Profile / Entitlements API integration with cache and fallback;
-- distributed REST and subscription-operation limits;
-- bounded latest-value backpressure for slow quote consumers;
+- REST endpoints for one or many latest quotes, including stale-data metadata and partial results;
+- authenticated WebSocket subscribe/unsubscribe, snapshots, heartbeat, idle cleanup, and machine-readable errors;
+- Basic, Pro, and Premium symbol, connection, operation, and update-frequency policies;
+- optional Client Profile / Entitlements API integration with timeout, retry, cache, and fallback;
+- distributed token-bucket burst and sustained limits;
+- bounded latest-value backpressure and slow-consumer warnings;
 - structured JSON logs with correlation IDs and sensitive-value redaction;
-- Prometheus metrics, Grafana dashboard, and alert rules;
-- idempotent auditable usage stream for future billing integration;
-- deterministic before/after routing benchmark and deployed WebSocket load runner;
-- OpenAPI, AsyncAPI, C4 diagrams, ADRs, provider licensing gate, tests, and CI.
+- Prometheus metrics, collector/provider metrics, Grafana dashboard, and alert rules;
+- asynchronous idempotent usage capture and durable PostgreSQL audit records;
+- deterministic before/after routing benchmark with payload-byte accounting;
+- deployed WebSocket load runner with P50/P95/P99 latency, throughput, errors, and network bytes;
+- OpenAPI, AsyncAPI, public v1 compatibility manifest, C4 diagrams, ADRs, licensing gate, tests, and CI.
 
 Critical transactional events such as order statuses, trade confirmations, risk events, and critical alerts are deliberately excluded from quote-throttling and replacement semantics.
 
@@ -60,10 +67,12 @@ docker compose up --build
 
 Services:
 
-| Service | Address |
+| Service | Address / role |
 |---|---|
 | REST/OpenAPI | `http://localhost:8000/docs` |
 | WebSocket | `ws://localhost:8000/v1/stream` |
+| Collector | mock provider + control/quote streams |
+| Usage writer | Redis usage stream → PostgreSQL |
 | Prometheus | `http://localhost:9090` |
 | Grafana | `http://localhost:3000` (`admin` / `admin`) |
 | Redis | `localhost:6379` |
@@ -85,7 +94,7 @@ curl -H 'Authorization: Bearer dev-pro:bob' \
   'http://localhost:8000/v1/quotes?symbols=AAPL,TSLA,NVDA'
 ```
 
-WebSocket command:
+WebSocket commands:
 
 ```json
 {
@@ -93,6 +102,13 @@ WebSocket command:
   "symbols": ["AAPL", "TSLA"],
   "channels": ["quote"],
   "request_id": "demo-1"
+}
+```
+
+```json
+{
+  "action": "ping",
+  "request_id": "heartbeat-1"
 }
 ```
 
@@ -104,12 +120,12 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 
 ruff check .
-ruff format --check .
 mypy
 pytest
+python scripts/check_contract_compatibility.py
 ```
 
-Integration tests use Redis database 15 by default. Override it with `TEST_REDIS_URL`.
+Integration tests use Redis database 15 and PostgreSQL when `TEST_REDIS_URL` and `TEST_DATABASE_URL` are set.
 
 ## Benchmarks
 
@@ -121,6 +137,7 @@ smdg-benchmark \
   --symbols-per-client 20 \
   --symbol-universe 500 \
   --events-per-symbol 100 \
+  --quote-payload-bytes 256 \
   --output benchmark-results
 ```
 
@@ -134,7 +151,7 @@ python benchmarks/ws_load.py \
   --messages 20
 ```
 
-The CI smoke benchmark uploads raw JSON and Markdown artifacts. No simulated result is presented as a production fact. A real-provider benchmark will be performed only after selecting a provider, confirming its caching/redistribution/benchmark rights, and recording the exact environment and commit SHA.
+The CI smoke benchmark uploads raw JSON and Markdown artifacts. No simulated result is presented as a production fact. A real-provider benchmark will be performed only after selecting a provider, confirming its caching, redistribution, non-display, and benchmark rights, and recording the exact environment and commit SHA.
 
 ## Documentation
 
@@ -145,6 +162,7 @@ The CI smoke benchmark uploads raw JSON and Markdown artifacts. No simulated res
 - [End-to-end quote flow](docs/architecture/quote-flow.md)
 - [Architecture decisions](docs/architecture/adr/)
 - [WebSocket AsyncAPI](docs/asyncapi.yaml)
+- [Public API compatibility manifest](contracts/public-api-v1.json)
 - [Benchmark methodology](docs/benchmark-methodology.md)
 - [Provider licensing checklist](docs/provider-licensing-checklist.md)
 
