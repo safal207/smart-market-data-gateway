@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "smart-market-data-gateway"
-version = "0.2.0"
-description = "Adaptive market-data gateway with smart subscription aggregation and tier-based QoS"
+version = "0.3.0"
+description = "Adaptive market-data gateway with accepted-event history and deterministic candles"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
@@ -39,6 +39,8 @@ dev = [
 [project.scripts]
 smdg-benchmark = "smart_market_data_gateway.benchmark:main"
 smdg-collector = "smart_market_data_gateway.collector:main"
+smdg-history-sink = "smart_market_data_gateway.history:main"
+smdg-replay = "smart_market_data_gateway.replay:main"
 smdg-usage-sink = "smart_market_data_gateway.usage_sink:main"
 
 [tool.hatch.build.targets.wheel]
