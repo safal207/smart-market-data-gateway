@@ -11,10 +11,16 @@ from smart_market_data_gateway.history import HistorySink
 from smart_market_data_gateway.storage import RedisStore
 
 
-def accepted_event(event_id: int, timestamp: datetime, price: str) -> AcceptedQuoteEvent:
+def accepted_event(
+    event_id: int,
+    timestamp: datetime,
+    price: str,
+    *,
+    symbol: str = "AAPL",
+) -> AcceptedQuoteEvent:
     event = QuoteEvent(
         event_id=UUID(int=event_id),
-        symbol="AAPL",
+        symbol=symbol,
         price=Decimal(price),
         provider_timestamp=timestamp,
         received_at=timestamp + timedelta(milliseconds=10),
@@ -33,16 +39,20 @@ def accepted_event(event_id: int, timestamp: datetime, price: str) -> AcceptedQu
     )
 
 
+def history_database_url() -> str:
+    database_url = os.getenv("TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("TEST_DATABASE_URL is required for the history integration test")
+    return database_url
+
+
 async def test_history_sink_persists_events_and_finalized_candles(
     redis_client,
     test_settings,
 ) -> None:
-    database_url = os.getenv("TEST_DATABASE_URL")
-    if not database_url:
-        pytest.skip("TEST_DATABASE_URL is required for the history integration test")
     config = test_settings.model_copy(
         update={
-            "database_url": database_url,
+            "database_url": history_database_url(),
             "candle_intervals_seconds": "1",
             "candle_allowed_lateness_seconds": 0.0,
             "enable_history_retention": False,
@@ -96,3 +106,53 @@ async def test_history_sink_persists_events_and_finalized_candles(
     assert candle["finalized"] is True
 
     await sink.close()
+
+
+async def test_history_restart_restores_active_window_for_each_symbol(
+    redis_client,
+    test_settings,
+) -> None:
+    config = test_settings.model_copy(
+        update={
+            "database_url": history_database_url(),
+            "candle_intervals_seconds": "300",
+            "candle_allowed_lateness_seconds": 0.0,
+            "enable_history_retention": False,
+        }
+    )
+    sink = HistorySink(redis_client, config)
+    await sink.start()
+    assert sink.pool is not None
+
+    async with sink.pool.acquire() as connection:
+        await connection.execute("TRUNCATE TABLE late_quote_events, candles, quote_events")
+        async with connection.transaction():
+            await sink._insert_event(
+                connection,
+                accepted_event(
+                    10,
+                    datetime(2026, 8, 1, 12, 0, tzinfo=UTC),
+                    "200",
+                    symbol="MSFT",
+                ),
+            )
+            await sink._insert_event(
+                connection,
+                accepted_event(
+                    11,
+                    datetime(2026, 8, 1, 13, 0, tzinfo=UTC),
+                    "100",
+                    symbol="AAPL",
+                ),
+            )
+    await sink.close()
+
+    restarted = HistorySink(redis_client, config)
+    await restarted.start()
+    restored = restarted.builder.flush()
+
+    assert {(candle.symbol, candle.event_count) for candle in restored} == {
+        ("AAPL", 1),
+        ("MSFT", 1),
+    }
+    await restarted.close()
