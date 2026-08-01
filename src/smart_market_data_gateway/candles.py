@@ -118,11 +118,11 @@ class CandleBuilder:
                 late_intervals.append(interval)
                 continue
             key = (event.symbol, interval, bucket_start)
-            candle = self._active.get(key)
-            if candle is None:
+            active_candle = self._active.get(key)
+            if active_candle is None:
                 self._active[key] = _MutableCandle.from_event(accepted, interval)
             else:
-                candle.add(accepted)
+                active_candle.add(accepted)
 
         finalized = self._finalize_ready(event.symbol, watermark)
         return CandleBuildResult(
@@ -140,19 +140,21 @@ class CandleBuilder:
 
     def _finalize_ready(self, symbol: str, watermark: datetime) -> list[Candle]:
         ready_keys: list[tuple[str, int, datetime]] = []
-        for key, candle in self._active.items():
-            if candle.symbol != symbol:
+        for key, active_candle in self._active.items():
+            if active_candle.symbol != symbol:
                 continue
-            bucket_end = candle.bucket_start + timedelta(seconds=candle.interval_seconds)
+            bucket_end = active_candle.bucket_start + timedelta(seconds=active_candle.interval_seconds)
             if bucket_end + self.allowed_lateness <= watermark:
                 ready_keys.append(key)
 
         ready_keys.sort(key=lambda item: (item[1], item[2]))
         finalized: list[Candle] = []
         for key in ready_keys:
-            candle = self._active.pop(key).finalize()
-            finalized.append(candle)
-            self._finalized_through[(candle.symbol, candle.interval_seconds)] = candle.bucket_start
+            finalized_candle = self._active.pop(key).finalize()
+            finalized.append(finalized_candle)
+            self._finalized_through[
+                (finalized_candle.symbol, finalized_candle.interval_seconds)
+            ] = finalized_candle.bucket_start
         return finalized
 
 
