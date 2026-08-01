@@ -73,6 +73,18 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  usage-writer:
+    build: .
+    command: ["python", "-m", "smart_market_data_gateway.usage_sink"]
+    environment:
+      <<: *gateway-environment
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
   prometheus:
     image: prom/prometheus:v3.5.0
     command: ["--config.file=/etc/prometheus/prometheus.yml"]
