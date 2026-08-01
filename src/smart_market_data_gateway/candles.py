@@ -103,7 +103,11 @@ class CandleBuilder:
     def add(self, accepted: AcceptedQuoteEvent) -> CandleBuildResult:
         event = accepted.event
         previous_watermark = self._watermark_by_symbol.get(event.symbol)
-        watermark = max(previous_watermark, event.provider_timestamp) if previous_watermark else event.provider_timestamp
+        watermark = (
+            max(previous_watermark, event.provider_timestamp)
+            if previous_watermark
+            else event.provider_timestamp
+        )
         self._watermark_by_symbol[event.symbol] = watermark
 
         late_intervals: list[int] = []
