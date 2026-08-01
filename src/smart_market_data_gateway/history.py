@@ -10,6 +10,10 @@ from redis.asyncio import Redis
 from smart_market_data_gateway.candles import CandleBuilder
 from smart_market_data_gateway.config import Settings, settings
 from smart_market_data_gateway.domain import AcceptedQuoteEvent, Candle
+from smart_market_data_gateway.integrity import (
+    ACCEPTED_EVENT_CHAIN_NAME,
+    build_integrity_record,
+)
 from smart_market_data_gateway.logging import configure_logging
 from smart_market_data_gateway.storage import RedisStore
 
@@ -40,6 +44,42 @@ CREATE INDEX IF NOT EXISTS quote_events_symbol_time_idx
     ON quote_events (symbol, provider_timestamp DESC);
 CREATE INDEX IF NOT EXISTS quote_events_provider_time_idx
     ON quote_events (provider, provider_timestamp DESC);
+
+CREATE TABLE IF NOT EXISTS accepted_event_integrity (
+    chain_name TEXT NOT NULL,
+    chain_sequence BIGINT NOT NULL CHECK (chain_sequence > 0),
+    profile TEXT NOT NULL,
+    event_id UUID NOT NULL,
+    provider_timestamp TIMESTAMPTZ NOT NULL,
+    source_stream_id TEXT,
+    payload_digest TEXT NOT NULL CHECK (payload_digest ~ '^sha256:[0-9a-f]{64}$'),
+    previous_record_hash TEXT CHECK (
+        previous_record_hash IS NULL OR previous_record_hash ~ '^sha256:[0-9a-f]{64}$'
+    ),
+    record_hash TEXT NOT NULL CHECK (record_hash ~ '^sha256:[0-9a-f]{64}$'),
+    appended_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY (chain_name, chain_sequence),
+    UNIQUE (chain_name, event_id, provider_timestamp),
+    UNIQUE (chain_name, record_hash)
+);
+CREATE INDEX IF NOT EXISTS accepted_event_integrity_event_idx
+    ON accepted_event_integrity (event_id, provider_timestamp);
+
+CREATE TABLE IF NOT EXISTS integrity_chain_heads (
+    chain_name TEXT PRIMARY KEY,
+    chain_sequence BIGINT NOT NULL DEFAULT 0 CHECK (chain_sequence >= 0),
+    record_hash TEXT CHECK (
+        record_hash IS NULL OR record_hash ~ '^sha256:[0-9a-f]{64}$'
+    ),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CHECK (
+        (chain_sequence = 0 AND record_hash IS NULL)
+        OR (chain_sequence > 0 AND record_hash IS NOT NULL)
+    )
+);
+INSERT INTO integrity_chain_heads (chain_name)
+VALUES ('accepted_quotes')
+ON CONFLICT (chain_name) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS candles (
     symbol TEXT NOT NULL,
@@ -127,6 +167,40 @@ VALUES (
 )
 ON CONFLICT (event_id, provider_timestamp) DO NOTHING
 RETURNING event_id
+"""
+
+_LOCK_INTEGRITY_HEAD = """
+SELECT chain_sequence, record_hash
+FROM integrity_chain_heads
+WHERE chain_name = $1
+FOR UPDATE
+"""
+
+_INITIALIZE_INTEGRITY_HEAD = """
+INSERT INTO integrity_chain_heads (chain_name)
+VALUES ($1)
+ON CONFLICT (chain_name) DO NOTHING
+"""
+
+_INSERT_INTEGRITY_RECORD = """
+INSERT INTO accepted_event_integrity (
+    chain_name,
+    chain_sequence,
+    profile,
+    event_id,
+    provider_timestamp,
+    source_stream_id,
+    payload_digest,
+    previous_record_hash,
+    record_hash
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+"""
+
+_UPDATE_INTEGRITY_HEAD = """
+UPDATE integrity_chain_heads
+SET chain_sequence = $2, record_hash = $3, updated_at = NOW()
+WHERE chain_name = $1
 """
 
 _UPSERT_CANDLE = """
@@ -345,12 +419,53 @@ class HistorySink:
             else:
                 raise
 
+    async def _persist_integrity_record(
+        self,
+        connection: asyncpg.Connection,
+        accepted: AcceptedQuoteEvent,
+    ) -> None:
+        await connection.execute(_INITIALIZE_INTEGRITY_HEAD, ACCEPTED_EVENT_CHAIN_NAME)
+        head = await connection.fetchrow(
+            _LOCK_INTEGRITY_HEAD,
+            ACCEPTED_EVENT_CHAIN_NAME,
+        )
+        if head is None:
+            raise RuntimeError("accepted-event integrity chain head is unavailable")
+        previous_record_hash = head["record_hash"]
+        if previous_record_hash is not None and not isinstance(previous_record_hash, str):
+            raise RuntimeError("accepted-event integrity chain head is invalid")
+        sequence = int(head["chain_sequence"]) + 1
+        record = build_integrity_record(
+            sequence,
+            accepted,
+            previous_record_hash,
+        )
+        await connection.execute(
+            _INSERT_INTEGRITY_RECORD,
+            record.chain_name,
+            record.sequence,
+            record.profile,
+            record.event_id,
+            record.provider_timestamp,
+            record.source_stream_id,
+            record.payload_digest,
+            record.previous_record_hash,
+            record.record_hash,
+        )
+        await connection.execute(
+            _UPDATE_INTEGRITY_HEAD,
+            record.chain_name,
+            record.sequence,
+            record.record_hash,
+        )
+
     async def _insert_event(
         self,
         connection: asyncpg.Connection,
         accepted: AcceptedQuoteEvent,
     ) -> UUID | None:
         event = accepted.event
+        payload = accepted.model_dump_json()
         value = await connection.fetchval(
             _INSERT_EVENT,
             event.event_id,
@@ -368,9 +483,12 @@ class HistorySink:
             accepted.quality.gap_detected,
             accepted.quality.normalization_version,
             accepted.source_stream_id,
-            accepted.model_dump_json(),
+            payload,
         )
-        return value if isinstance(value, UUID) else None
+        if not isinstance(value, UUID):
+            return None
+        await self._persist_integrity_record(connection, accepted)
+        return value
 
     async def _upsert_candle(
         self,
