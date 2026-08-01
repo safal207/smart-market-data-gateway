@@ -87,6 +87,7 @@ class Settings(BaseSettings):
     rejected_stream_maxlen: int = 100_000
     retry_limit: int = 3
     dedupe_ttl_seconds: int = 3600
+    event_claim_ttl_seconds: int = Field(default=30, gt=0)
 
     quote_freshness_seconds: float = 5.0
     accepted_event_max_age_seconds: float = 30.0
