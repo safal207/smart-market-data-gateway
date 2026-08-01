@@ -12,6 +12,7 @@ from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 from uuid import NAMESPACE_URL, uuid5
 
 import httpx
+from pydantic import ValidationError
 import websockets
 
 from smart_market_data_gateway.domain import QuoteEvent
@@ -151,9 +152,10 @@ class TradernetProviderAdapter(MarketDataProvider):
         return ProviderHealth(self._state, self._message)
 
     async def events(self) -> AsyncIterator[QuoteEvent]:
-        websocket = self._websocket
-        if websocket is None or self._state is not ProviderState.CONNECTED:
+        current_websocket = self._websocket
+        if current_websocket is None or self._state is not ProviderState.CONNECTED:
             raise TradernetError("Tradernet provider is not connected")
+        websocket: Any = current_websocket
 
         while self._websocket is websocket:
             try:
@@ -359,16 +361,23 @@ class TradernetProviderAdapter(MarketDataProvider):
             separators=(",", ":"),
             default=str,
         )
-        return QuoteEvent(
-            event_id=uuid5(NAMESPACE_URL, f"tradernet:{fingerprint}"),
-            symbol=symbol,
-            price=price,
-            bid=bid,
-            ask=ask,
-            provider_timestamp=provider_timestamp,
-            received_at=received_at,
-            provider="tradernet",
-        )
+        try:
+            return QuoteEvent(
+                event_id=uuid5(NAMESPACE_URL, f"tradernet:{fingerprint}"),
+                symbol=symbol,
+                price=price,
+                bid=bid,
+                ask=ask,
+                provider_timestamp=provider_timestamp,
+                received_at=received_at,
+                provider="tradernet",
+            )
+        except ValidationError:
+            logger.warning(
+                "Ignoring invalid Tradernet quote",
+                extra={"event": "tradernet_invalid_quote", "symbol": symbol},
+            )
+            return None
 
     @staticmethod
     def _positive_decimal(value: Any) -> Decimal | None:
