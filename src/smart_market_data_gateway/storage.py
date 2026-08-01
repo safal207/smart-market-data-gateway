@@ -2,7 +2,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 import json
 import logging
-from typing import Any
+from typing import Any, Literal, cast
 
 from redis.asyncio import Redis
 from redis.asyncio.client import PubSub
@@ -18,6 +18,25 @@ from smart_market_data_gateway.domain import (
 )
 
 logger = logging.getLogger(__name__)
+
+EventClaimStatus = Literal["claimed", "processed", "busy"]
+
+_CLAIM_EVENT_SCRIPT = """
+if redis.call('EXISTS', KEYS[1]) == 1 then
+  return 'processed'
+end
+local claimed = redis.call('SET', KEYS[2], ARGV[1], 'NX', 'EX', ARGV[2])
+if claimed then
+  return 'claimed'
+end
+return 'busy'
+"""
+
+_MARK_EVENT_PROCESSED_SCRIPT = """
+redis.call('SET', KEYS[1], '1', 'EX', ARGV[1])
+redis.call('DEL', KEYS[2])
+return 1
+"""
 
 
 class RedisStore:
@@ -151,7 +170,34 @@ class RedisStore:
             )
         return result
 
+    async def claim_event(self, event: QuoteEvent, source_stream_id: str) -> EventClaimStatus:
+        result = await self.redis.eval(
+            _CLAIM_EVENT_SCRIPT,
+            2,
+            self._processed_key(event),
+            self._claim_key(event),
+            source_stream_id,
+            self.settings.event_claim_ttl_seconds,
+        )
+        status = str(result)
+        if status not in {"claimed", "processed", "busy"}:
+            raise RuntimeError(f"unexpected event claim status: {status}")
+        return cast(EventClaimStatus, status)
+
+    async def mark_event_processed(self, event: QuoteEvent) -> None:
+        await self.redis.eval(
+            _MARK_EVENT_PROCESSED_SCRIPT,
+            2,
+            self._processed_key(event),
+            self._claim_key(event),
+            self.settings.dedupe_ttl_seconds,
+        )
+
+    async def release_event_claim(self, event: QuoteEvent) -> None:
+        await self.redis.delete(self._claim_key(event))
+
     async def accept_event_once(self, event: QuoteEvent) -> bool:
+        """Compatibility helper for callers that only need a simple dedupe gate."""
         accepted = await self.redis.set(
             f"smdg:dedupe:{event.event_id}",
             "1",
@@ -282,3 +328,11 @@ class RedisStore:
         if isinstance(summary, (list, tuple)) and summary:
             return int(summary[0])
         return 0
+
+    @staticmethod
+    def _processed_key(event: QuoteEvent) -> str:
+        return f"smdg:event:processed:{event.event_id}"
+
+    @staticmethod
+    def _claim_key(event: QuoteEvent) -> str:
+        return f"smdg:event:claim:{event.event_id}"
