@@ -50,16 +50,19 @@ history row and a second integrity record.
 
 `smdg-replay` reproduces accepted-event order. `smdg-verify-history` checks that
 stored payloads still match their digests, all links are continuous, sequence
-numbers have no gaps, and the persisted head matches the verified chain.
+numbers have no gaps, the persisted head matches the verified chain, and every
+quote-history row has a corresponding integrity record.
 
-Replay, feature generation, and model training should be blocked operationally
-when integrity verification fails.
+Replay verifies integrity by default. The explicit
+`--skip-integrity-verification` flag exists for controlled forensic recovery,
+not routine data processing. Feature generation and model training should use
+the same fail-closed default.
 
 ### 6. Fail closed on ambiguous history
 
 The verifier raises a hard error for missing payloads, sequence gaps, changed
-payloads, profile changes, broken previous-hash links, or a mismatched chain
-head. It does not silently repair evidence.
+payloads, profile changes, broken previous-hash links, a mismatched chain head,
+or incomplete quote-history coverage. It does not silently repair evidence.
 
 ## History transaction
 
@@ -119,8 +122,8 @@ can construct a new internally consistent history.
 ## Proven and unproven boundaries
 
 This repository now has executable evidence for deterministic hashing, chain
-verification, two important process-crash windows, and exactly-once database
-effects under redelivery.
+verification, two important process-crash windows, exactly-once database
+effects under redelivery, and fail-closed replay by default.
 
 It does not prove sudden-power-loss durability on arbitrary hardware, hostile
 storage correctness, distributed consensus, exchange-grade timestamp precision,
