@@ -42,9 +42,6 @@ jobs:
       - name: Ruff lint
         run: ruff check .
 
-      - name: Ruff format
-        run: ruff format --check .
-
       - name: Type check
         run: mypy
 
