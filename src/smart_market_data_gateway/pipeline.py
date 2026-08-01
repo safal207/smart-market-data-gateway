@@ -8,7 +8,13 @@ from uuid import uuid4
 from pydantic import ValidationError
 
 from smart_market_data_gateway.config import Settings
-from smart_market_data_gateway.domain import QuoteEvent
+from smart_market_data_gateway.domain import (
+    AcceptedQuoteEvent,
+    DataQualityMetadata,
+    QuoteEvent,
+    QuoteRejectionReason,
+    RejectedQuoteEvent,
+)
 from smart_market_data_gateway.metrics import GatewayMetrics
 from smart_market_data_gateway.qos import ConnectionHub
 from smart_market_data_gateway.storage import RedisStore
@@ -17,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 class QuoteProcessor:
-    """Durable stream processor: validate, dedupe, detect gaps, cache, and fan out."""
+    """Durable stream processor: validate, gate, audit, cache, and fan out."""
 
     def __init__(self, store: RedisStore, settings: Settings, metrics: GatewayMetrics) -> None:
         self.store = store
@@ -67,13 +73,26 @@ class QuoteProcessor:
         try:
             payload = fields["payload"]
             event = QuoteEvent.model_validate_json(payload)
-            if not await self.store.accept_event_once(event):
+            first_claim = await self.store.accept_event_once(event)
+            if not first_claim and await self.store.is_event_processed(event):
                 self.metrics.deduplicated_events.inc()
-                await self.store.ack(
-                    self.settings.quote_stream,
-                    self.settings.stream_group,
+                await self._reject(event, stream_id, QuoteRejectionReason.DUPLICATE)
+                await self._ack(stream_id)
+                return
+
+            feed_age_seconds = max(
+                0.0,
+                (event.received_at - event.provider_timestamp).total_seconds(),
+            )
+            if feed_age_seconds > self.settings.accepted_event_max_age_seconds:
+                await self._reject(
+                    event,
                     stream_id,
+                    QuoteRejectionReason.STALE,
+                    detail=f"feed age {feed_age_seconds:.3f}s exceeds accepted limit",
                 )
+                await self.store.mark_event_processed(event)
+                await self._ack(stream_id)
                 return
 
             observation = await self.store.observe_sequence(event)
@@ -103,19 +122,74 @@ class QuoteProcessor:
                         "stream_id": stream_id,
                     },
                 )
+                if observation.out_of_order:
+                    await self._reject(
+                        event,
+                        stream_id,
+                        QuoteRejectionReason.OUT_OF_ORDER,
+                        detail=(
+                            f"sequence {observation.current_sequence} is not newer than "
+                            f"{observation.previous_sequence}"
+                        ),
+                    )
+                    await self.store.mark_event_processed(event)
+                    await self._ack(stream_id)
+                    return
 
+            accepted_at = datetime.now(UTC)
+            quality_score = 0.8 if observation is not None else 1.0
+            if event.sequence is None:
+                quality_score = min(quality_score, 0.9)
+            accepted = AcceptedQuoteEvent(
+                event=event,
+                quality=DataQualityMetadata(
+                    score=quality_score,
+                    gap_detected=observation is not None,
+                    out_of_order=False,
+                    stale=False,
+                    source_provider=event.provider,
+                    normalization_version=self.settings.normalization_version,
+                    accepted_at=accepted_at,
+                ),
+                data_cutoff=event.provider_timestamp,
+                source_stream_id=stream_id,
+            )
+
+            await self.store.publish_accepted_event(accepted)
             await self.store.cache_quote(event)
             await self.store.publish_fanout(event)
+            await self.store.mark_event_processed(event)
             self.metrics.provider_events.labels(event.provider).inc()
-            await self.store.ack(
-                self.settings.quote_stream,
-                self.settings.stream_group,
-                stream_id,
-            )
+            await self._ack(stream_id)
         except (KeyError, ValidationError, ValueError) as exc:
             await self._handle_failure(stream_id, fields, exc)
         except Exception as exc:
             await self._handle_failure(stream_id, fields, exc)
+
+    async def _reject(
+        self,
+        event: QuoteEvent,
+        stream_id: str,
+        reason: QuoteRejectionReason,
+        *,
+        detail: str | None = None,
+    ) -> None:
+        await self.store.publish_rejected_event(
+            RejectedQuoteEvent(
+                event=event,
+                reason=reason,
+                rejected_at=datetime.now(UTC),
+                source_stream_id=stream_id,
+                detail=detail,
+            )
+        )
+
+    async def _ack(self, stream_id: str) -> None:
+        await self.store.ack(
+            self.settings.quote_stream,
+            self.settings.stream_group,
+            stream_id,
+        )
 
     async def _handle_failure(
         self,
@@ -141,11 +215,7 @@ class QuoteProcessor:
                 error=str(exc),
                 retry_count=retry_count,
             )
-            await self.store.ack(
-                self.settings.quote_stream,
-                self.settings.stream_group,
-                stream_id,
-            )
+            await self._ack(stream_id)
 
     async def close(self) -> None:
         self._closed = True
