@@ -237,8 +237,8 @@ class HistorySink:
         )
 
     async def _hydrate_builder(self, connection: asyncpg.Connection) -> None:
-        latest = await connection.fetchval("SELECT MAX(provider_timestamp) FROM quote_events")
-        if latest is None:
+        has_events = await connection.fetchval("SELECT EXISTS (SELECT 1 FROM quote_events)")
+        if not has_events:
             return
         lookback = timedelta(
             seconds=max(self.config.candle_intervals)
@@ -246,12 +246,28 @@ class HistorySink:
         )
         rows = await connection.fetch(
             """
-            SELECT payload::text
+            WITH latest_by_symbol AS (
+                SELECT symbol, MAX(provider_timestamp) AS latest_timestamp
+                FROM quote_events
+                GROUP BY symbol
+            )
+            SELECT quote_events.payload::text
             FROM quote_events
-            WHERE provider_timestamp >= $1
-            ORDER BY provider_timestamp, received_at, event_id
+            JOIN latest_by_symbol USING (symbol)
+            WHERE quote_events.provider_timestamp >= latest_timestamp - $1::interval
+            ORDER BY
+              CASE
+                WHEN source_stream_id ~ '^[0-9]+-[0-9]+$'
+                THEN split_part(source_stream_id, '-', 1)::bigint
+              END NULLS LAST,
+              CASE
+                WHEN source_stream_id ~ '^[0-9]+-[0-9]+$'
+                THEN split_part(source_stream_id, '-', 2)::bigint
+              END NULLS LAST,
+              accepted_at,
+              event_id
             """,
-            latest - lookback,
+            lookback,
         )
         for row in rows:
             self.builder.add(AcceptedQuoteEvent.model_validate_json(row["payload"]))
