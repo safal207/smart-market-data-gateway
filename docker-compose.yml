@@ -14,7 +14,8 @@ services:
       start_period: 3s
 
   postgres:
-    image: timescale/timescaledb:latest-pg17
+    image: timescale/timescaledb:latest-pg17@sha256:3e65c273cbf7218f2a28692492b4625b49f35c7d2142e945561ef52311a8c83a
+    command: ["postgres", "-c", "shared_preload_libraries=timescaledb"]
     environment:
       POSTGRES_DB: smdg
       POSTGRES_USER: smdg
