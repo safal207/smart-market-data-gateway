@@ -6,7 +6,10 @@ import json
 from pathlib import Path
 from typing import Any
 
-from benchmarks.ws_load import execute
+if __package__:
+    from benchmarks.ws_load import execute
+else:
+    from ws_load import execute
 
 
 def load_profiles(path: Path) -> dict[str, dict[str, Any]]:
