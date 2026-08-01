@@ -1,0 +1,45 @@
+{
+  "smoke": {
+    "clients": 10,
+    "symbols_per_client": 5,
+    "messages": 20,
+    "heartbeat_seconds": 10,
+    "description": "Connectivity, contract, and first quote delivery"
+  },
+  "medium-100": {
+    "clients": 100,
+    "symbols_per_client": 20,
+    "messages": 50,
+    "heartbeat_seconds": 10,
+    "description": "Aggregation, QoS, network, and latency"
+  },
+  "medium-500": {
+    "clients": 500,
+    "symbols_per_client": 20,
+    "messages": 50,
+    "heartbeat_seconds": 10,
+    "description": "Upper medium-load saturation check"
+  },
+  "load-1000": {
+    "clients": 1000,
+    "symbols_per_client": 20,
+    "messages": 100,
+    "heartbeat_seconds": 10,
+    "description": "First production-shaped gateway load step"
+  },
+  "load-10000": {
+    "clients": 10000,
+    "symbols_per_client": 20,
+    "messages": 100,
+    "heartbeat_seconds": 10,
+    "description": "Target capacity scenario; requires a dedicated load host and staged ramp-up"
+  },
+  "legacy-673": {
+    "clients": 500,
+    "symbols_per_client": 20,
+    "messages": 50,
+    "heartbeat_seconds": 10,
+    "required_symbol_universe": 673,
+    "description": "Regression for the historical 673-instrument subscription set"
+  }
+}
