@@ -63,14 +63,8 @@ async def postgres_events(
           AND ($2::timestamptz IS NULL OR provider_timestamp < $2)
           AND ($3::text[] IS NULL OR symbol = ANY($3))
         ORDER BY
-          CASE
-            WHEN source_stream_id ~ '^[0-9]+-[0-9]+$'
-            THEN split_part(source_stream_id, '-', 1)::bigint
-          END NULLS LAST,
-          CASE
-            WHEN source_stream_id ~ '^[0-9]+-[0-9]+$'
-            THEN split_part(source_stream_id, '-', 2)::bigint
-          END NULLS LAST,
+          source_stream_ms NULLS LAST,
+          source_stream_sequence NULLS LAST,
           accepted_at,
           event_id
     """
