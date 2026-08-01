@@ -46,8 +46,8 @@ async def connect_and_subscribe(
     return socket
 
 
-async def receive_quote(socket: Any, timeout: float) -> dict[str, Any]:
-    async with asyncio.timeout(timeout):
+async def receive_quote(socket: Any, timeout_seconds: float) -> dict[str, Any]:
+    async with asyncio.timeout(timeout_seconds):
         while True:
             raw = await socket.recv()
             payload = json.loads(raw)
