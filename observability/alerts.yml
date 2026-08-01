@@ -1,6 +1,14 @@
 groups:
   - name: smart-market-data-gateway
     rules:
+      - alert: MarketDataProviderDisconnected
+        expr: smdg_provider_connected == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: Market-data provider is disconnected
+
       - alert: NoActiveUpstreamSubscriptions
         expr: smdg_client_subscriptions > 0 and smdg_unique_upstream_subscriptions == 0
         for: 30s
@@ -48,3 +56,11 @@ groups:
           severity: warning
         annotations:
           summary: Clients are receiving stale quote snapshots
+
+      - alert: UsageBufferDrops
+        expr: increase(smdg_usage_queue_dropped_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: Asynchronous billable-usage records are being dropped
