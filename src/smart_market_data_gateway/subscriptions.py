@@ -1,8 +1,9 @@
 import asyncio
-from datetime import UTC, datetime
 import logging
 import time
-from typing import Any
+from collections.abc import Awaitable
+from datetime import UTC, datetime
+from typing import Any, cast
 
 from redis.asyncio import Redis
 
@@ -88,17 +89,21 @@ class SubscriptionRegistry:
         expires_at = now + self.settings.subscription_ttl_seconds
         for symbol in sorted(symbols):
             symbol = symbol.upper()
-            result: list[Any] = await self.redis.eval(
-                _SUBSCRIBE_SCRIPT,
-                2,
-                self._symbol_key(symbol),
-                self._connection_key(connection_id),
-                now,
-                expires_at,
-                connection_id,
-                symbol,
-                self.settings.subscription_ttl_seconds,
+            evaluation = cast(
+                Awaitable[Any],
+                self.redis.eval(
+                    _SUBSCRIBE_SCRIPT,
+                    2,
+                    self._symbol_key(symbol),
+                    self._connection_key(connection_id),
+                    str(now),
+                    str(expires_at),
+                    connection_id,
+                    symbol,
+                    str(self.settings.subscription_ttl_seconds),
+                ),
             )
+            result = cast(list[Any], await evaluation)
             _before, after, added = (int(result[0]), int(result[1]), int(result[2]))
             if added:
                 added_symbols.add(symbol)
@@ -121,15 +126,19 @@ class SubscriptionRegistry:
         now = time.time()
         for symbol in sorted(symbols):
             symbol = symbol.upper()
-            result: list[Any] = await self.redis.eval(
-                _UNSUBSCRIBE_SCRIPT,
-                2,
-                self._symbol_key(symbol),
-                self._connection_key(connection_id),
-                now,
-                connection_id,
-                symbol,
+            evaluation = cast(
+                Awaitable[Any],
+                self.redis.eval(
+                    _UNSUBSCRIBE_SCRIPT,
+                    2,
+                    self._symbol_key(symbol),
+                    self._connection_key(connection_id),
+                    str(now),
+                    connection_id,
+                    symbol,
+                ),
             )
+            result = cast(list[Any], await evaluation)
             removed, after = int(result[0]), int(result[1])
             if removed:
                 removed_symbols.add(symbol)
@@ -138,9 +147,13 @@ class SubscriptionRegistry:
         await self.refresh_metrics()
         return removed_symbols
 
+    async def _connection_symbols(self, connection_key: str) -> set[str]:
+        request = cast(Awaitable[set[Any]], self.redis.smembers(connection_key))
+        return {str(symbol) for symbol in await request}
+
     async def heartbeat(self, connection_id: str) -> None:
         connection_key = self._connection_key(connection_id)
-        symbols = {str(symbol) for symbol in await self.redis.smembers(connection_key)}
+        symbols = await self._connection_symbols(connection_key)
         if not symbols:
             return
         expires_at = time.time() + self.settings.subscription_ttl_seconds
@@ -153,7 +166,7 @@ class SubscriptionRegistry:
 
     async def disconnect(self, connection_id: str) -> set[str]:
         connection_key = self._connection_key(connection_id)
-        symbols = {str(symbol) for symbol in await self.redis.smembers(connection_key)}
+        symbols = await self._connection_symbols(connection_key)
         removed = await self.unsubscribe(connection_id, symbols) if symbols else set()
         await self.redis.delete(connection_key)
         return removed
@@ -170,13 +183,17 @@ class SubscriptionRegistry:
     async def _release_after_grace(self, symbol: str) -> None:
         try:
             await asyncio.sleep(self.settings.subscription_grace_seconds)
-            released = await self.redis.eval(
-                _RELEASE_SCRIPT,
-                2,
-                self._symbol_key(symbol),
-                self._state_key(symbol),
-                time.time(),
+            evaluation = cast(
+                Awaitable[Any],
+                self.redis.eval(
+                    _RELEASE_SCRIPT,
+                    2,
+                    self._symbol_key(symbol),
+                    self._state_key(symbol),
+                    str(time.time()),
+                ),
             )
+            released = await evaluation
             if int(released):
                 await self.store.publish_control("unsubscribe", symbol)
                 logger.info(
@@ -243,9 +260,7 @@ class SubscriptionRegistry:
         return {
             "client_subscriptions": client_subscriptions,
             "unique_upstream_subscriptions": unique_symbols,
-            "aggregation_ratio": (
-                client_subscriptions / unique_symbols if unique_symbols else 0.0
-            ),
+            "aggregation_ratio": client_subscriptions / unique_symbols if unique_symbols else 0.0,
             "measured_at": datetime.now(UTC).timestamp(),
         }
 
