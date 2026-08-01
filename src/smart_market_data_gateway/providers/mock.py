@@ -39,7 +39,7 @@ class MockMarketDataProvider(MarketDataProvider):
         self._symbols: set[str] = set()
         self._sequence_by_symbol: dict[str, int] = {}
         self._events_emitted = 0
-        self._queue: asyncio.Queue[QuoteEvent] = asyncio.Queue()
+        self._queue: asyncio.Queue[QuoteEvent | None] = asyncio.Queue()
         self._task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
 
@@ -51,6 +51,7 @@ class MockMarketDataProvider(MarketDataProvider):
         async with self._lock:
             if self._task is not None and not self._task.done():
                 return
+            self._queue = asyncio.Queue()
             self._state = ProviderState.CONNECTING
             self._message = None
             self._task = asyncio.create_task(self._run(), name="mock-market-data-provider")
@@ -67,6 +68,7 @@ class MockMarketDataProvider(MarketDataProvider):
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
+        await self._queue.put(None)
 
     async def subscribe(self, symbols: Collection[str]) -> None:
         normalized = {self._normalize_symbol(symbol) for symbol in symbols}
@@ -84,8 +86,11 @@ class MockMarketDataProvider(MarketDataProvider):
         return ProviderHealth(state=self._state, message=self._message)
 
     async def events(self) -> AsyncIterator[QuoteEvent]:
-        while self._state is not ProviderState.DISCONNECTED or not self._queue.empty():
-            yield await self._queue.get()
+        while True:
+            event = await self._queue.get()
+            if event is None:
+                return
+            yield event
 
     async def _run(self) -> None:
         try:
@@ -112,6 +117,7 @@ class MockMarketDataProvider(MarketDataProvider):
         except Exception as exc:
             self._state = ProviderState.DEGRADED
             self._message = str(exc)
+            await self._queue.put(None)
 
     def _next_event(self, symbol: str) -> QuoteEvent:
         sequence = self._sequence_by_symbol[symbol] + 1
