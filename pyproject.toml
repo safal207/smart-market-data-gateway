@@ -42,6 +42,7 @@ smdg-collector = "smart_market_data_gateway.collector:main"
 smdg-history-sink = "smart_market_data_gateway.history:main"
 smdg-replay = "smart_market_data_gateway.replay:main"
 smdg-usage-sink = "smart_market_data_gateway.usage_sink:main"
+smdg-verify-history = "smart_market_data_gateway.integrity:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/smart_market_data_gateway"]
