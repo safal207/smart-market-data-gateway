@@ -2,12 +2,15 @@ import asyncio
 from contextlib import suppress
 import logging
 import random
+import time
 from uuid import uuid4
 
+from prometheus_client import start_http_server
 from redis.asyncio import Redis
 
 from smart_market_data_gateway.config import Settings, settings
 from smart_market_data_gateway.logging import configure_logging
+from smart_market_data_gateway.metrics import GatewayMetrics
 from smart_market_data_gateway.providers import (
     MarketDataProvider,
     MockMarketDataProvider,
@@ -22,10 +25,17 @@ logger = logging.getLogger(__name__)
 class CollectorService:
     """Owns the provider connection and translates global control events into subscriptions."""
 
-    def __init__(self, provider: MarketDataProvider, store: RedisStore, config: Settings) -> None:
+    def __init__(
+        self,
+        provider: MarketDataProvider,
+        store: RedisStore,
+        config: Settings,
+        metrics: GatewayMetrics,
+    ) -> None:
         self.provider = provider
         self.store = store
         self.config = config
+        self.metrics = metrics
         self.consumer_name = f"collector-{uuid4()}"
         self.active_symbols: set[str] = set()
         self._closed = False
@@ -41,6 +51,7 @@ class CollectorService:
             control_task.cancel()
             provider_task.cancel()
             await asyncio.gather(control_task, provider_task, return_exceptions=True)
+            self.metrics.provider_connected.labels(self.provider.name).set(0)
             await self.provider.disconnect()
 
     async def _control_loop(self) -> None:
@@ -106,12 +117,24 @@ class CollectorService:
 
     async def _provider_loop(self) -> None:
         backoff = 0.5
+        outage_started: float | None = None
         while not self._closed:
             try:
                 async with self._provider_lock:
                     await self.provider.connect()
                     if self.active_symbols:
                         await self.provider.subscribe(sorted(self.active_symbols))
+                self.metrics.provider_connected.labels(self.provider.name).set(1)
+                await self.store.redis.set(
+                    f"smdg:provider:state:{self.provider.name}",
+                    "connected",
+                    ex=60,
+                )
+                if outage_started is not None:
+                    self.metrics.provider_outage_duration.labels(self.provider.name).observe(
+                        time.monotonic() - outage_started
+                    )
+                    outage_started = None
                 logger.info(
                     "provider connected",
                     extra={"event": "provider_connected", "provider": self.provider.name},
@@ -121,6 +144,10 @@ class CollectorService:
                     if self._closed:
                         break
                     await self.store.publish_quote(event)
+                    await self.store.redis.expire(
+                        f"smdg:provider:state:{self.provider.name}",
+                        60,
+                    )
                 if self._closed:
                     break
                 health = await self.provider.health()
@@ -128,6 +155,15 @@ class CollectorService:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                self.metrics.provider_connected.labels(self.provider.name).set(0)
+                self.metrics.provider_reconnects.labels(self.provider.name).inc()
+                if outage_started is None:
+                    outage_started = time.monotonic()
+                await self.store.redis.set(
+                    f"smdg:provider:state:{self.provider.name}",
+                    "disconnected",
+                    ex=60,
+                )
                 logger.warning(
                     "provider disconnected; reconnect scheduled",
                     extra={"event": "provider_reconnect", "provider": self.provider.name},
@@ -144,7 +180,11 @@ class CollectorService:
         self._closed = True
 
 
-def build_mock_collector(redis: Redis, config: Settings) -> CollectorService:
+def build_mock_collector(
+    redis: Redis,
+    config: Settings,
+    metrics: GatewayMetrics | None = None,
+) -> CollectorService:
     provider = MockMarketDataProvider(
         MockProviderConfig(
             interval_seconds=config.mock_interval_seconds,
@@ -152,13 +192,20 @@ def build_mock_collector(redis: Redis, config: Settings) -> CollectorService:
             fail_after_events=config.mock_fail_after_events,
         )
     )
-    return CollectorService(provider, RedisStore(redis, config), config)
+    return CollectorService(
+        provider,
+        RedisStore(redis, config),
+        config,
+        metrics or GatewayMetrics(),
+    )
 
 
 async def _run() -> None:
     configure_logging(settings.log_level)
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
-    collector = build_mock_collector(redis, settings)
+    metrics = GatewayMetrics()
+    start_http_server(settings.collector_metrics_port, registry=metrics.registry)
+    collector = build_mock_collector(redis, settings, metrics)
     try:
         await collector.run()
     finally:
