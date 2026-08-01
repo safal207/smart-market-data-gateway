@@ -95,6 +95,9 @@ class Settings(BaseSettings):
     candle_allowed_lateness_seconds: float = 2.0
     history_batch_size: int = 100
     history_command_timeout_seconds: float = 10.0
+    enable_history_retention: bool = False
+    quote_event_retention_days: int = Field(default=90, gt=0)
+    candle_retention_days: int = Field(default=730, gt=0)
 
     subscription_grace_seconds: float = 3.0
     subscription_ttl_seconds: int = 60
