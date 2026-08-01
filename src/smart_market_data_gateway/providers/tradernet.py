@@ -7,7 +7,7 @@ from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 import json
 import logging
-from typing import Any
+from typing import Any, cast
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 from uuid import NAMESPACE_URL, uuid5
 
@@ -77,7 +77,7 @@ class TradernetProviderAdapter(MarketDataProvider):
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         self.config = config
-        self._websocket_factory = websocket_factory or websockets.connect
+        self._websocket_factory = websocket_factory or cast(WebSocketFactory, websockets.connect)
         self._http_client = http_client
         self._websocket: Any | None = None
         self._state = ProviderState.DISCONNECTED
@@ -122,9 +122,10 @@ class TradernetProviderAdapter(MarketDataProvider):
             if self._active_symbols:
                 await self._send_subscription()
         except Exception as exc:
+            safe_message = self._redact(str(exc))
             self._state = ProviderState.DISCONNECTED
-            self._message = str(exc)
-            raise
+            self._message = safe_message
+            raise TradernetError(f"Tradernet connection failed: {safe_message}") from exc
 
     async def disconnect(self) -> None:
         websocket = self._websocket
@@ -158,8 +159,9 @@ class TradernetProviderAdapter(MarketDataProvider):
             try:
                 raw = await websocket.recv()
             except Exception as exc:
+                safe_message = self._redact(str(exc))
                 self._state = ProviderState.DEGRADED
-                self._message = f"websocket receive failed: {exc}"
+                self._message = f"websocket receive failed: {safe_message}"
                 if self.config.snapshot_fallback and self._active_symbols:
                     try:
                         for snapshot in await self.fetch_snapshots(self._active_symbols):
@@ -170,7 +172,7 @@ class TradernetProviderAdapter(MarketDataProvider):
                             extra={"event": "tradernet_snapshot_fallback_failed"},
                             exc_info=True,
                         )
-                raise
+                raise TradernetError(self._message) from exc
 
             for event in self.parse_message(raw):
                 yield event
@@ -227,7 +229,7 @@ class TradernetProviderAdapter(MarketDataProvider):
             response.raise_for_status()
             payload = response.json()
         except (httpx.HTTPError, ValueError) as exc:
-            raise TradernetAPIError(f"Tradernet snapshot request failed: {exc}") from exc
+            raise TradernetAPIError(f"Tradernet snapshot request failed: {self._redact(str(exc))}") from exc
         finally:
             if owns_client:
                 await client.aclose()
@@ -272,6 +274,18 @@ class TradernetProviderAdapter(MarketDataProvider):
             self._state = ProviderState.DEGRADED
             self._message = "SID was rejected or expired; Tradernet returned demo mode"
             raise TradernetAuthenticationError(self._message)
+
+    def _redact(self, value: str) -> str:
+        redacted = value
+        for secret in (
+            self.config.sid,
+            self.config.user_id,
+            self.config.api_key,
+            self.config.api_secret,
+        ):
+            if secret:
+                redacted = redacted.replace(secret, "[redacted]")
+        return redacted
 
     @staticmethod
     def _normalize_symbols(symbols: Collection[str]) -> set[str]:
@@ -358,7 +372,7 @@ class TradernetProviderAdapter(MarketDataProvider):
 
     @staticmethod
     def _positive_decimal(value: Any) -> Decimal | None:
-        if value in {None, "", "-"}:
+        if value is None or value == "" or value == "-":
             return None
         try:
             parsed = Decimal(str(value).replace(" ", "").replace(",", "."))
