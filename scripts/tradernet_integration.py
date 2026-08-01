@@ -8,6 +8,7 @@ from datetime import datetime
 import json
 from pathlib import Path
 import time
+from typing import Any
 
 from smart_market_data_gateway.config import Settings
 from smart_market_data_gateway.domain import QuoteEvent
@@ -89,7 +90,7 @@ async def collect_events(
     )
 
 
-async def execute(args: argparse.Namespace) -> dict[str, object]:
+async def execute(args: argparse.Namespace) -> dict[str, Any]:
     settings = Settings()
     symbols = [
         symbol.strip().upper()
@@ -155,8 +156,11 @@ def main() -> None:
     result = asyncio.run(execute(args))
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(result, indent=2), encoding="utf-8")
-    print(json.dumps(result["checks"], indent=2))
-    if not all(result["checks"].values()):  # type: ignore[union-attr]
+    checks = result["checks"]
+    if not isinstance(checks, dict):
+        raise TypeError("integration result checks must be a dictionary")
+    print(json.dumps(checks, indent=2))
+    if not all(bool(value) for value in checks.values()):
         raise SystemExit(1)
 
 
