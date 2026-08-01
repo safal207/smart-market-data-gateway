@@ -137,6 +137,72 @@ jobs:
           name: api-contract
           path: openapi.json
 
+  postgres-fallback-migration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: smdg_plain
+          POSTGRES_USER: smdg
+          POSTGRES_PASSWORD: smdg-test-only
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U smdg -d smdg_plain"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      SMDG_DATABASE_URL: postgresql://smdg:smdg-test-only@localhost:55432/smdg_plain
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install project
+        run: pip install -e .
+
+      - name: Apply migration twice without TimescaleDB
+        run: |
+          smdg-migrate --migrations-dir migrations
+          smdg-migrate --migrations-dir migrations
+
+      - name: Verify plain PostgreSQL schema
+        run: |
+          python - <<'PY'
+          import asyncio
+          import asyncpg
+          import os
+
+          async def main() -> None:
+              connection = await asyncpg.connect(os.environ["SMDG_DATABASE_URL"])
+              try:
+                  assert not await connection.fetchval(
+                      "SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb')"
+                  )
+                  for table in (
+                      "quote_events",
+                      "candles",
+                      "late_quote_events",
+                      "accepted_event_integrity",
+                  ):
+                      assert await connection.fetchval(
+                          "SELECT to_regclass($1) IS NOT NULL",
+                          f"public.{table}",
+                      )
+              finally:
+                  await connection.close()
+
+          asyncio.run(main())
+          PY
+
   benchmark-smoke:
     runs-on: ubuntu-latest
     needs: quality
