@@ -51,6 +51,20 @@ CREATE TABLE IF NOT EXISTS accepted_event_integrity (
 CREATE INDEX IF NOT EXISTS accepted_event_integrity_event_idx
     ON accepted_event_integrity (event_id, provider_timestamp);
 
+CREATE OR REPLACE FUNCTION reject_accepted_event_integrity_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RAISE EXCEPTION 'accepted_event_integrity is append-only';
+END;
+$$;
+DROP TRIGGER IF EXISTS accepted_event_integrity_append_only
+    ON accepted_event_integrity;
+CREATE TRIGGER accepted_event_integrity_append_only
+BEFORE UPDATE OR DELETE ON accepted_event_integrity
+FOR EACH ROW EXECUTE FUNCTION reject_accepted_event_integrity_mutation();
+
 CREATE TABLE IF NOT EXISTS integrity_chain_heads (
     chain_name TEXT PRIMARY KEY,
     chain_sequence BIGINT NOT NULL DEFAULT 0 CHECK (chain_sequence >= 0),
