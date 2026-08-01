@@ -175,9 +175,9 @@ class CandleBuilder:
         else:
             self._watermark_by_symbol[symbol] = checkpoint.watermark
 
-        for key in tuple(self._finalized_through):
-            if key[0] == symbol:
-                self._finalized_through.pop(key)
+        for finalized_key in tuple(self._finalized_through):
+            if finalized_key[0] == symbol:
+                self._finalized_through.pop(finalized_key)
         for interval, value in checkpoint.finalized_through.items():
             self._finalized_through[(symbol, interval)] = value
 
