@@ -26,6 +26,7 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from smart_market_data_gateway.config import Settings, settings
+from smart_market_data_gateway.connections import ConnectionRegistry
 from smart_market_data_gateway.domain import (
     ClientIdentity,
     StreamMessage,
@@ -55,6 +56,7 @@ from smart_market_data_gateway.security import (
 )
 from smart_market_data_gateway.storage import RedisStore
 from smart_market_data_gateway.subscriptions import SubscriptionRegistry
+from smart_market_data_gateway.usage import UsageRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -76,11 +78,13 @@ def create_app(config: Settings | None = None) -> FastAPI:
         profiles = ClientProfileClient(config)
         limiter = DistributedRateLimiter(store)
         subscriptions = SubscriptionRegistry(redis_client, store, config, metrics)
+        connections = ConnectionRegistry(redis_client, config)
+        usage = UsageRecorder(store, max_queue_size=config.usage_queue_size)
         processor = QuoteProcessor(store, config, metrics)
         fanout = FanoutListener(store, hub)
 
         await store.ensure_groups()
-        tasks = [
+        background_tasks = [
             asyncio.create_task(processor.run(), name="quote-processor"),
             asyncio.create_task(fanout.run(), name="fanout-listener"),
             asyncio.create_task(
@@ -88,6 +92,7 @@ def create_app(config: Settings | None = None) -> FastAPI:
                 name="subscription-cleanup",
             ),
         ]
+        usage_task = asyncio.create_task(usage.run(), name="usage-recorder")
 
         app.state.redis = redis_client
         app.state.metrics = metrics
@@ -98,6 +103,8 @@ def create_app(config: Settings | None = None) -> FastAPI:
         app.state.profiles = profiles
         app.state.limiter = limiter
         app.state.subscriptions = subscriptions
+        app.state.connections = connections
+        app.state.usage = usage
 
         try:
             yield
@@ -105,11 +112,12 @@ def create_app(config: Settings | None = None) -> FastAPI:
             await processor.close()
             await fanout.close()
             await subscriptions.close()
-            for task in tasks:
+            await usage.close(timeout_seconds=config.shutdown_timeout_seconds / 2)
+            for task in background_tasks:
                 task.cancel()
             with suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(
-                    asyncio.gather(*tasks, return_exceptions=True),
+                    asyncio.gather(*background_tasks, usage_task, return_exceptions=True),
                     timeout=config.shutdown_timeout_seconds,
                 )
             await profiles.close()
@@ -195,7 +203,7 @@ def create_app(config: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="quote not found")
         if snapshot.stale:
             request.app.state.metrics.stale_quotes.inc()
-        await request.app.state.store.record_usage(
+        request.app.state.usage.record(
             idempotency_key=f"rest:{identity.client_id}:{normalized}:{uuid4()}",
             client_id=identity.client_id,
             event_type="quote_read",
@@ -234,6 +242,13 @@ def create_app(config: Settings | None = None) -> FastAPI:
                 if snapshot.stale:
                     request.app.state.metrics.stale_quotes.inc()
                 data.append(snapshot.model_dump(mode="json"))
+        request.app.state.usage.record(
+            idempotency_key=f"rest-many:{identity.client_id}:{uuid4()}",
+            client_id=identity.client_id,
+            event_type="quote_multi_read",
+            quantity=len(normalized),
+            metadata={"symbols": normalized, "tier": identity.tier.value},
+        )
         return {"data": data, "errors": errors}
 
     @app.get("/internal/stats", tags=["operations"])
@@ -244,6 +259,7 @@ def create_app(config: Settings | None = None) -> FastAPI:
             "local": local,
             "global": global_stats,
             "redis_pending_entries": await request.app.state.store.pending_count(),
+            "usage_queue_dropped": request.app.state.usage.dropped,
         }
 
     @app.get("/metrics", include_in_schema=False)
@@ -269,11 +285,29 @@ def create_app(config: Settings | None = None) -> FastAPI:
         correlation_id_var.set(correlation_id)
         connection_id_var.set(connection_id)
         policy = websocket.app.state.qos.policy_for(identity.tier)
+        acquired, active_connections = await websocket.app.state.connections.acquire(
+            client_id=identity.client_id,
+            connection_id=connection_id,
+            max_connections=policy.max_connections,
+        )
+        if not acquired:
+            await websocket.close(
+                code=4408,
+                reason=f"connection limit exceeded ({active_connections}/{policy.max_connections})",
+            )
+            correlation_id_var.set("")
+            connection_id_var.set("")
+            return
+
         buffer_size = max(1, min(config.websocket_queue_size, policy.max_symbols * 2))
         session = ClientSession(
             connection_id=connection_id,
             identity=identity,
             buffer=LatestValueBuffer(buffer_size),
+            metadata={
+                "last_activity": time.monotonic(),
+                "last_coalescing_warning": 0,
+            },
         )
         await websocket.app.state.hub.add(session)
         await websocket.accept()
@@ -301,11 +335,41 @@ def create_app(config: Settings | None = None) -> FastAPI:
                         data={"quote": event.model_dump(mode="json")},
                     )
                 )
+                previous_warning = int(session.metadata.get("last_coalescing_warning", 0))
+                if (
+                    session.buffer.coalesced - previous_warning
+                    >= config.coalescing_warning_threshold
+                ):
+                    session.metadata["last_coalescing_warning"] = session.buffer.coalesced
+                    await send_message(
+                        StreamMessage(
+                            type="warning",
+                            data={
+                                "code": "slow_consumer",
+                                "message": "quote updates were coalesced to protect the connection",
+                                "coalesced_events": session.buffer.coalesced,
+                            },
+                        )
+                    )
 
         async def heartbeat_loop() -> None:
             while True:
                 await asyncio.sleep(config.heartbeat_seconds)
+                idle_seconds = time.monotonic() - float(session.metadata["last_activity"])
+                if idle_seconds > config.client_idle_timeout_seconds:
+                    await send_message(
+                        StreamMessage(
+                            type="warning",
+                            data={
+                                "code": "idle_timeout",
+                                "message": "connection closed because no client heartbeat was received",
+                            },
+                        )
+                    )
+                    await websocket.close(code=4408, reason="client heartbeat timeout")
+                    return
                 await websocket.app.state.subscriptions.heartbeat(connection_id)
+                await websocket.app.state.connections.heartbeat(connection_id)
                 await send_message(
                     StreamMessage(
                         type="heartbeat",
@@ -316,6 +380,7 @@ def create_app(config: Settings | None = None) -> FastAPI:
         async def receive_loop() -> None:
             while True:
                 payload = await websocket.receive_json()
+                session.metadata["last_activity"] = time.monotonic()
                 try:
                     command = SubscriptionCommand.model_validate(payload)
                     symbols = set(command.symbols)
@@ -341,7 +406,10 @@ def create_app(config: Settings | None = None) -> FastAPI:
                             StreamMessage(
                                 type="error",
                                 request_id=command.request_id,
-                                data={"code": "rate_limit", "message": "subscription limit exceeded"},
+                                data={
+                                    "code": "rate_limit",
+                                    "message": "subscription limit exceeded",
+                                },
                             )
                         )
                         continue
@@ -407,7 +475,7 @@ def create_app(config: Settings | None = None) -> FastAPI:
                             )
                         )
 
-                    await websocket.app.state.store.record_usage(
+                    websocket.app.state.usage.record(
                         idempotency_key=(
                             f"ws:{connection_id}:{command.request_id or uuid4()}:{command.action}"
                         ),
@@ -435,10 +503,11 @@ def create_app(config: Settings | None = None) -> FastAPI:
                     "tier": identity.tier.value,
                     "policy": policy.model_dump(),
                     "correlation_id": correlation_id,
+                    "active_connections": active_connections,
                 },
             )
         )
-        await websocket.app.state.store.record_usage(
+        websocket.app.state.usage.record(
             idempotency_key=f"ws-connect:{connection_id}",
             client_id=identity.client_id,
             event_type="ws_connect",
@@ -470,7 +539,8 @@ def create_app(config: Settings | None = None) -> FastAPI:
             await asyncio.gather(sender, heartbeat, return_exceptions=True)
             await websocket.app.state.subscriptions.disconnect(connection_id)
             await websocket.app.state.hub.remove(connection_id)
-            await websocket.app.state.store.record_usage(
+            await websocket.app.state.connections.release(connection_id)
+            websocket.app.state.usage.record(
                 idempotency_key=f"ws-disconnect:{connection_id}",
                 client_id=identity.client_id,
                 event_type="ws_disconnect",
