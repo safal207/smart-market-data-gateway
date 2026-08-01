@@ -10,6 +10,11 @@ from redis.asyncio import Redis
 from smart_market_data_gateway.candles import CandleBuilder
 from smart_market_data_gateway.config import Settings, settings
 from smart_market_data_gateway.domain import AcceptedQuoteEvent, Candle
+from smart_market_data_gateway.durability import (
+    HistoryFailpoint,
+    crash_if,
+    parse_history_failpoint,
+)
 from smart_market_data_gateway.integrity import (
     ACCEPTED_EVENT_CHAIN_NAME,
     build_integrity_record,
@@ -64,6 +69,20 @@ CREATE TABLE IF NOT EXISTS accepted_event_integrity (
 );
 CREATE INDEX IF NOT EXISTS accepted_event_integrity_event_idx
     ON accepted_event_integrity (event_id, provider_timestamp);
+
+CREATE OR REPLACE FUNCTION reject_accepted_event_integrity_mutation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RAISE EXCEPTION 'accepted_event_integrity is append-only';
+END;
+$$;
+DROP TRIGGER IF EXISTS accepted_event_integrity_append_only
+    ON accepted_event_integrity;
+CREATE TRIGGER accepted_event_integrity_append_only
+BEFORE UPDATE OR DELETE ON accepted_event_integrity
+FOR EACH ROW EXECUTE FUNCTION reject_accepted_event_integrity_mutation();
 
 CREATE TABLE IF NOT EXISTS integrity_chain_heads (
     chain_name TEXT PRIMARY KEY,
@@ -262,6 +281,7 @@ class HistorySink:
             config.candle_intervals,
             allowed_lateness_seconds=config.candle_allowed_lateness_seconds,
         )
+        self.failpoint = parse_history_failpoint(config.history_failpoint)
         self._closed = False
 
     async def start(self) -> None:
@@ -382,6 +402,10 @@ class HistorySink:
                     if inserted is None:
                         self.builder = builder_before
                     else:
+                        crash_if(
+                            self.failpoint,
+                            HistoryFailpoint.AFTER_LEDGER_APPEND_BEFORE_COMMIT,
+                        )
                         for interval in result.late_intervals:
                             await connection.execute(
                                 _INSERT_LATE_EVENT,
@@ -393,6 +417,10 @@ class HistorySink:
                             )
                         for candle in result.finalized:
                             await self._upsert_candle(connection, candle)
+            crash_if(
+                self.failpoint,
+                HistoryFailpoint.AFTER_DB_COMMIT_BEFORE_ACK,
+            )
             await self.store.ack(
                 self.config.accepted_event_stream,
                 self.config.history_group,
