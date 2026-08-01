@@ -56,6 +56,7 @@ class Settings(BaseSettings):
     app_name: str = "Smart Market Data Gateway"
     environment: str = "development"
     log_level: str = "INFO"
+    collector_metrics_port: int = 9101
 
     redis_url: str = Field(default="redis://localhost:6379/0")
     database_url: str | None = Field(default=None)
