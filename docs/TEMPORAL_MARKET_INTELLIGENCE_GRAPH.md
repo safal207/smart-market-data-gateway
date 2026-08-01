@@ -26,7 +26,7 @@ This repository currently implements the trusted-data slice required before grap
 - TimescaleDB-compatible accepted-event history;
 - deterministic quote-derived 1s, 10s, 1m, and 5m OHLC candles;
 - explicit late-event audit without silent candle mutation;
-- deterministic replay at `1x`, `10x`, custom speed, or `max`;
+- deterministic accepted-event replay at `1x`, `10x`, custom speed, or `max`;
 - an isolated history worker outside quote delivery.
 
 No graph features, prediction model, signal API, or claim of alpha is implemented yet.
@@ -44,7 +44,7 @@ flowchart LR
     F --> G[(TimescaleDB quote_events)]
     F --> H[(Finalized candles)]
     F --> I[(Late event audit)]
-    G --> J[Deterministic replay]
+    G --> J[Deterministic accepted-event replay]
     H --> K[Future point-in-time features]
     G --> K
     K --> L[Future temporal graph and models]
@@ -63,7 +63,7 @@ The quote processor performs only bounded Redis operations:
 5. append the immutable envelope to the accepted stream;
 6. update the latest cache and fan out the quote.
 
-The history worker consumes the accepted stream independently. If it is unavailable, accepted entries remain pending in Redis and quote delivery continues.
+The history worker consumes the accepted stream independently. If it is unavailable, accepted entries remain pending in Redis and quote delivery continues. Pending history entries are reclaimed after the configured idle interval and retried through the same idempotent persistence path.
 
 ## Accepted-event contract
 
@@ -109,22 +109,32 @@ Candle rules:
 - candle quality is the minimum quality score among its events;
 - a configurable watermark allows bounded lateness;
 - an event arriving after finalization is written to `late_quote_events` and does not mutate the candle;
-- replay and live processing use the same `AcceptedQuoteEvent` and `CandleBuilder` code.
+- live history and any explicit candle-rebuild worker must use the same `AcceptedQuoteEvent` and `CandleBuilder` implementation.
 
-## Storage
+`ReplayService` itself does not build candles. It deterministically re-emits accepted envelopes to JSONL or to a selected Redis Stream. The documented replay stream, `smdg:accepted-quotes:replay:v1`, is deliberately separate from the live history input and is not consumed by `history-writer` by default.
 
-TimescaleDB hypertables:
+To rebuild candles, run a separate history worker against the replay stream and an isolated target database or schema. Never route replay into the live accepted stream unless duplicate downstream processing and its consequences are explicitly intended.
+
+## Storage and migrations
+
+The versioned files in `migrations/` are the sole schema authority. `smdg-migrate` applies them in order under an advisory lock and verifies checksums on later runs. Runtime workers fail fast when the required migration is missing.
+
+TimescaleDB hypertables when the extension is available:
 
 - `quote_events` partitioned by `provider_timestamp`;
 - `candles` partitioned by `bucket_start`;
 - `late_quote_events` partitioned by `provider_timestamp`.
 
+The same migration creates plain PostgreSQL tables when TimescaleDB is unavailable.
+
 Supporting PostgreSQL tables:
 
+- `accepted_event_integrity` and `integrity_chain_heads`;
 - `data_quality_intervals`;
-- `market_sessions`.
+- `market_sessions`;
+- `schema_migrations`.
 
-Retention is disabled by default. It must be enabled only after provider licensing, backups, replay requirements, and audit retention have been agreed.
+Retention is disabled by default. Disabling it also removes previously installed TimescaleDB retention policies. It must be enabled only after provider licensing, backups, replay requirements, and audit retention have been agreed.
 
 ## Local operation
 
@@ -132,7 +142,7 @@ Retention is disabled by default. It must be enabled only after provider licensi
 docker compose up --build
 ```
 
-The stack includes `history-writer` and a TimescaleDB PostgreSQL 17 container.
+The one-shot `migrate` service completes before `history-writer` starts. The stack includes a TimescaleDB PostgreSQL 17 container.
 
 Replay accepted events to JSONL:
 
@@ -154,7 +164,7 @@ smdg-replay \
   --output-stream smdg:accepted-quotes:replay:v1
 ```
 
-Do not replay into the live accepted stream unless duplicate downstream processing is intentionally desired.
+Replay verifies the complete accepted-event integrity chain before emitting data unless the emergency forensic override is supplied.
 
 ## Next implementation milestones
 
