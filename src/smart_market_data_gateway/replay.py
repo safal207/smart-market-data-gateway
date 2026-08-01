@@ -11,6 +11,7 @@ from redis.asyncio import Redis
 
 from smart_market_data_gateway.config import settings
 from smart_market_data_gateway.domain import AcceptedQuoteEvent
+from smart_market_data_gateway.integrity import verify_accepted_event_chain
 
 Emitter = Callable[[AcceptedQuoteEvent], Awaitable[None]]
 Sleeper = Callable[[float], Awaitable[None]]
@@ -155,6 +156,20 @@ async def _run(args: argparse.Namespace) -> int:
     output_handle: TextIO | None = None
     redis: Redis | None = None
     try:
+        if not args.skip_integrity_verification:
+            async with pool.acquire() as connection:
+                verification = await verify_accepted_event_chain(connection)
+            print(
+                "history_integrity_verified="
+                f"{verification.event_count}:{verification.head_record_hash or 'empty'}",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "warning=history_integrity_verification_skipped",
+                file=sys.stderr,
+            )
+
         source = postgres_events(
             pool,
             start=parse_timestamp(args.start),
@@ -198,6 +213,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--output-stream",
         help="optional Redis stream for replay envelopes; use a dedicated replay stream",
+    )
+    parser.add_argument(
+        "--skip-integrity-verification",
+        action="store_true",
+        help=(
+            "emergency diagnostic override; replay normally fails closed when the "
+            "accepted-event integrity chain is invalid"
+        ),
     )
     return parser
 
