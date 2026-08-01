@@ -78,6 +78,7 @@ class Settings(BaseSettings):
     dead_letter_stream: str = "smdg:dead-letter:v1"
     stream_group: str = "smdg:processors:v1"
     control_group: str = "smdg:collectors:v1"
+    usage_group: str = "smdg:usage-writers:v1"
     stream_maxlen: int = 100_000
     retry_limit: int = 3
     dedupe_ttl_seconds: int = 3600
