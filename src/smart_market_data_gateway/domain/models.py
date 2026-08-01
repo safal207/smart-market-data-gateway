@@ -1,10 +1,9 @@
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Annotated
+from typing import Annotated, Any
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-
 
 Symbol = Annotated[str, Field(min_length=1, max_length=32, pattern=r"^[A-Z0-9._:-]+$")]
 PositiveDecimal = Annotated[Decimal, Field(gt=0)]
