@@ -1,0 +1,99 @@
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+
+from smart_market_data_gateway.domain import QuoteEvent
+from smart_market_data_gateway.storage import RedisStore
+
+
+def quote(symbol: str = "AAPL", sequence: int = 1) -> QuoteEvent:
+    return QuoteEvent(
+        symbol=symbol,
+        price=Decimal("100.01"),
+        bid=Decimal("100.00"),
+        ask=Decimal("100.02"),
+        provider_timestamp=datetime.now(UTC),
+        sequence=sequence,
+        provider="test-provider",
+    )
+
+
+async def test_latest_cache_dedupe_and_sequence(redis_client, test_settings) -> None:
+    store = RedisStore(redis_client, test_settings)
+    event = quote()
+
+    await store.cache_quote(event)
+    snapshot = await store.get_latest("aapl")
+    assert snapshot is not None
+    assert snapshot.quote == event
+    assert snapshot.stale is False
+
+    assert await store.accept_event_once(event) is True
+    assert await store.accept_event_once(event) is False
+
+    assert await store.observe_sequence(event) is None
+    gap = await store.observe_sequence(quote(sequence=3))
+    assert gap is not None
+    assert gap.gap == 1
+    assert gap.out_of_order is False
+
+    out_of_order = await store.observe_sequence(quote(sequence=2))
+    assert out_of_order is not None
+    assert out_of_order.out_of_order is True
+
+
+async def test_stale_snapshot_and_many(redis_client, test_settings) -> None:
+    store = RedisStore(redis_client, test_settings)
+    stale = quote().model_copy(
+        update={
+            "received_at": datetime.now(UTC) - timedelta(seconds=10),
+            "provider_timestamp": datetime.now(UTC) - timedelta(seconds=10),
+        }
+    )
+    await store.cache_quote(stale)
+    result = await store.get_many(["AAPL", "UNKNOWN"])
+    assert result["AAPL"] is not None
+    assert result["AAPL"].stale is True
+    assert result["UNKNOWN"] is None
+
+
+async def test_stream_retry_dlq_rate_limit_and_usage(redis_client, test_settings) -> None:
+    store = RedisStore(redis_client, test_settings)
+    await store.ensure_groups()
+    event = quote()
+    stream_id = await store.publish_quote(event)
+    messages = await store.read_group(
+        test_settings.quote_stream,
+        test_settings.stream_group,
+        "test-consumer",
+        block_ms=10,
+    )
+    assert messages[0][0] == stream_id
+    assert "payload" in messages[0][1]
+
+    assert await store.increment_retry(stream_id) == 1
+    await store.move_to_dead_letter(
+        source_stream=test_settings.quote_stream,
+        stream_id=stream_id,
+        payload=messages[0][1],
+        error="boom",
+        retry_count=3,
+    )
+    assert len(await redis_client.xrange(test_settings.dead_letter_stream)) == 1
+
+    assert await store.rate_limit("client", 2) is True
+    assert await store.rate_limit("client", 2) is True
+    assert await store.rate_limit("client", 2) is False
+
+    assert await store.record_usage(
+        idempotency_key="usage-1",
+        client_id="client-1",
+        event_type="quote_read",
+    ) is True
+    assert await store.record_usage(
+        idempotency_key="usage-1",
+        client_id="client-1",
+        event_type="quote_read",
+    ) is False
+    assert len(await redis_client.xrange(test_settings.usage_stream)) == 1
+
+    await store.ack(test_settings.quote_stream, test_settings.stream_group, stream_id)
