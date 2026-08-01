@@ -8,7 +8,12 @@ import pytest
 
 from smart_market_data_gateway.candles import CandleBuilder
 from smart_market_data_gateway.domain import AcceptedQuoteEvent, DataQualityMetadata, QuoteEvent
+from smart_market_data_gateway.durability import HistoryCrash, HistoryFailpoint
 from smart_market_data_gateway.history import HistorySink
+from smart_market_data_gateway.integrity import (
+    IntegrityChainError,
+    verify_accepted_event_chain,
+)
 from smart_market_data_gateway.storage import RedisStore
 
 
@@ -60,18 +65,23 @@ async def reset_history_tables(connection: asyncpg.Connection) -> None:
     )
 
 
-async def test_history_sink_persists_events_and_finalized_candles(
-    redis_client,
-    test_settings,
-) -> None:
-    config = test_settings.model_copy(
+def history_config(test_settings, **updates):
+    return test_settings.model_copy(
         update={
             "database_url": history_database_url(),
             "candle_intervals_seconds": "1",
             "candle_allowed_lateness_seconds": 0.0,
             "enable_history_retention": False,
+            **updates,
         }
     )
+
+
+async def test_history_sink_persists_events_and_finalized_candles(
+    redis_client,
+    test_settings,
+) -> None:
+    config = history_config(test_settings)
     sink = HistorySink(redis_client, config)
     await sink.start()
     assert sink.pool is not None
@@ -112,6 +122,7 @@ async def test_history_sink_persists_events_and_finalized_candles(
             WHERE chain_name = 'accepted_quotes'
             """
         )
+        verification = await verify_accepted_event_chain(connection)
         candle = await connection.fetchrow(
             """
             SELECT open, high, low, close, event_count, finalized
@@ -123,6 +134,8 @@ async def test_history_sink_persists_events_and_finalized_candles(
     assert event_count == 3
     assert integrity_count == 3
     assert integrity_head == 3
+    assert verification.event_count == 3
+    assert verification.head_record_hash is not None
     assert candle is not None
     assert candle["open"] == Decimal("100")
     assert candle["high"] == Decimal("102")
@@ -138,13 +151,9 @@ async def test_history_restart_restores_active_window_for_each_symbol(
     redis_client,
     test_settings,
 ) -> None:
-    config = test_settings.model_copy(
-        update={
-            "database_url": history_database_url(),
-            "candle_intervals_seconds": "300",
-            "candle_allowed_lateness_seconds": 0.0,
-            "enable_history_retention": False,
-        }
+    config = history_config(
+        test_settings,
+        candle_intervals_seconds="300",
     )
     sink = HistorySink(redis_client, config)
     await sink.start()
@@ -182,3 +191,113 @@ async def test_history_restart_restores_active_window_for_each_symbol(
         ("MSFT", 1),
     }
     await restarted.close()
+
+
+async def test_integrity_verifier_detects_tampered_quote_payload(
+    redis_client,
+    test_settings,
+) -> None:
+    config = history_config(test_settings)
+    sink = HistorySink(redis_client, config)
+    await sink.start()
+    assert sink.pool is not None
+    event = accepted_event(20, datetime(2026, 8, 1, 14, 0, tzinfo=UTC), "100")
+
+    async with sink.pool.acquire() as connection:
+        await reset_history_tables(connection)
+        async with connection.transaction():
+            await sink._insert_event(connection, event)
+        verified = await verify_accepted_event_chain(connection)
+        assert verified.event_count == 1
+        await connection.execute(
+            """
+            UPDATE quote_events
+            SET payload = jsonb_set(payload, '{event,price}', '"999"'::jsonb)
+            WHERE event_id = $1 AND provider_timestamp = $2
+            """,
+            event.event.event_id,
+            event.event.provider_timestamp,
+        )
+        with pytest.raises(IntegrityChainError, match="payload digest mismatch"):
+            await verify_accepted_event_chain(connection)
+
+    await sink.close()
+
+
+async def test_crash_before_commit_rolls_back_and_retry_writes_once(
+    redis_client,
+    test_settings,
+) -> None:
+    crash_config = history_config(
+        test_settings,
+        history_failpoint=HistoryFailpoint.AFTER_LEDGER_APPEND_BEFORE_COMMIT.value,
+    )
+    event = accepted_event(30, datetime(2026, 8, 1, 15, 0, tzinfo=UTC), "100")
+    fields = {"payload": event.model_dump_json()}
+    crashed = HistorySink(redis_client, crash_config)
+    await crashed.start()
+    assert crashed.pool is not None
+
+    async with crashed.pool.acquire() as connection:
+        await reset_history_tables(connection)
+    with pytest.raises(HistoryCrash) as raised:
+        await crashed._persist("30-0", fields)
+    assert raised.value.point == HistoryFailpoint.AFTER_LEDGER_APPEND_BEFORE_COMMIT
+    async with crashed.pool.acquire() as connection:
+        assert await connection.fetchval("SELECT COUNT(*) FROM quote_events") == 0
+        assert await connection.fetchval("SELECT COUNT(*) FROM accepted_event_integrity") == 0
+        assert await connection.fetchval(
+            "SELECT chain_sequence FROM integrity_chain_heads WHERE chain_name = 'accepted_quotes'"
+        ) == 0
+    await crashed.close()
+
+    retry_config = history_config(test_settings, history_failpoint=None)
+    retried = HistorySink(redis_client, retry_config)
+    await retried.start()
+    await retried._persist("30-0", fields)
+    assert retried.pool is not None
+    async with retried.pool.acquire() as connection:
+        assert await connection.fetchval("SELECT COUNT(*) FROM quote_events") == 1
+        assert await connection.fetchval("SELECT COUNT(*) FROM accepted_event_integrity") == 1
+        verification = await verify_accepted_event_chain(connection)
+        assert verification.event_count == 1
+    await retried.close()
+
+
+async def test_crash_after_commit_before_ack_replays_without_duplicate(
+    redis_client,
+    test_settings,
+) -> None:
+    crash_config = history_config(
+        test_settings,
+        history_failpoint=HistoryFailpoint.AFTER_DB_COMMIT_BEFORE_ACK.value,
+    )
+    event = accepted_event(40, datetime(2026, 8, 1, 16, 0, tzinfo=UTC), "100")
+    fields = {"payload": event.model_dump_json()}
+    crashed = HistorySink(redis_client, crash_config)
+    await crashed.start()
+    assert crashed.pool is not None
+
+    async with crashed.pool.acquire() as connection:
+        await reset_history_tables(connection)
+    with pytest.raises(HistoryCrash) as raised:
+        await crashed._persist("40-0", fields)
+    assert raised.value.point == HistoryFailpoint.AFTER_DB_COMMIT_BEFORE_ACK
+    async with crashed.pool.acquire() as connection:
+        assert await connection.fetchval("SELECT COUNT(*) FROM quote_events") == 1
+        assert await connection.fetchval("SELECT COUNT(*) FROM accepted_event_integrity") == 1
+        verification = await verify_accepted_event_chain(connection)
+        assert verification.event_count == 1
+    await crashed.close()
+
+    retry_config = history_config(test_settings, history_failpoint=None)
+    retried = HistorySink(redis_client, retry_config)
+    await retried.start()
+    await retried._persist("40-0", fields)
+    assert retried.pool is not None
+    async with retried.pool.acquire() as connection:
+        assert await connection.fetchval("SELECT COUNT(*) FROM quote_events") == 1
+        assert await connection.fetchval("SELECT COUNT(*) FROM accepted_event_integrity") == 1
+        verification = await verify_accepted_event_chain(connection)
+        assert verification.event_count == 1
+    await retried.close()
