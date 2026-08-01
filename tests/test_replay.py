@@ -4,7 +4,7 @@ from decimal import Decimal
 from uuid import UUID
 
 from smart_market_data_gateway.domain import AcceptedQuoteEvent, DataQualityMetadata, QuoteEvent
-from smart_market_data_gateway.replay import ReplayService, parse_speed
+from smart_market_data_gateway.replay import ReplayService, build_parser, parse_speed
 
 
 def accepted_event(event_id: int, timestamp: datetime) -> AcceptedQuoteEvent:
@@ -77,3 +77,12 @@ def test_parse_speed_supports_named_and_numeric_modes() -> None:
     assert parse_speed("max") is None
     assert parse_speed("1x") == 1
     assert parse_speed("10") == 10
+
+
+def test_replay_verifies_integrity_unless_explicitly_overridden() -> None:
+    parser = build_parser()
+    safe = parser.parse_args([])
+    override = parser.parse_args(["--skip-integrity-verification"])
+
+    assert safe.skip_integrity_verification is False
+    assert override.skip_integrity_verification is True
