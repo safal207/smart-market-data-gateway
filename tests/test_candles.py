@@ -13,10 +13,11 @@ def accepted_event(
     price: str,
     sequence: int,
     quality: float = 1.0,
+    symbol: str = "AAPL",
 ) -> AcceptedQuoteEvent:
     event = QuoteEvent(
         event_id=UUID(int=event_id),
-        symbol="AAPL",
+        symbol=symbol,
         price=Decimal(price),
         bid=Decimal(price) - Decimal("0.01"),
         ask=Decimal(price) + Decimal("0.01"),
@@ -124,3 +125,53 @@ def test_late_event_does_not_mutate_finalized_candle() -> None:
     assert finalized.finalized[0].close == Decimal("100")
     assert late.late_intervals == (1,)
     assert late.finalized == ()
+
+
+def test_symbol_checkpoint_restores_only_failed_symbol() -> None:
+    start = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
+    builder = CandleBuilder((60,), allowed_lateness_seconds=0)
+    builder.add(
+        accepted_event(
+            event_id=1,
+            timestamp=start,
+            price="100",
+            sequence=1,
+            symbol="AAPL",
+        )
+    )
+    builder.add(
+        accepted_event(
+            event_id=2,
+            timestamp=start,
+            price="200",
+            sequence=2,
+            symbol="MSFT",
+        )
+    )
+
+    checkpoint = builder.checkpoint_symbol("AAPL")
+    builder.add(
+        accepted_event(
+            event_id=3,
+            timestamp=start + timedelta(seconds=10),
+            price="110",
+            sequence=3,
+            symbol="AAPL",
+        )
+    )
+    builder.add(
+        accepted_event(
+            event_id=4,
+            timestamp=start + timedelta(seconds=10),
+            price="210",
+            sequence=4,
+            symbol="MSFT",
+        )
+    )
+    builder.restore_symbol(checkpoint)
+
+    candles = {candle.symbol: candle for candle in builder.flush()}
+    assert candles["AAPL"].close == Decimal("100")
+    assert candles["AAPL"].event_count == 1
+    assert candles["MSFT"].close == Decimal("210")
+    assert candles["MSFT"].event_count == 2
