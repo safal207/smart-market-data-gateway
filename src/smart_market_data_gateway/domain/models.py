@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -27,10 +27,12 @@ class QuoteEvent(BaseModel):
     sequence: NonNegativeInteger | None = None
     provider: str = Field(min_length=1, max_length=64)
 
-    @field_validator("symbol")
+    @field_validator("symbol", mode="before")
     @classmethod
-    def normalize_symbol(cls, value: str) -> str:
-        return value.strip().upper()
+    def normalize_symbol(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.strip().upper()
+        return value
 
     @field_validator("provider_timestamp", "received_at")
     @classmethod
