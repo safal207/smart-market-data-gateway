@@ -21,9 +21,24 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: smdg_test
+          POSTGRES_USER: smdg
+          POSTGRES_PASSWORD: smdg-test-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U smdg -d smdg_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     env:
       TEST_REDIS_URL: redis://localhost:6379/15
+      TEST_DATABASE_URL: postgresql://smdg:smdg-test-only@localhost:5432/smdg_test
       SMDG_REDIS_URL: redis://localhost:6379/15
+      SMDG_DATABASE_URL: postgresql://smdg:smdg-test-only@localhost:5432/smdg_test
       SMDG_ENVIRONMENT: test
 
     steps:
@@ -78,7 +93,7 @@ jobs:
           from pathlib import Path
           import re
 
-          allowed = {"change-me-in-production", "replace-with-a-secret-from-your-secret-manager", "smdg-local-only"}
+          allowed = {"change-me-in-production", "replace-with-a-secret-from-your-secret-manager", "smdg-local-only", "smdg-test-only"}
           patterns = [
               re.compile(r"AKIA[0-9A-Z]{16}"),
               re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
