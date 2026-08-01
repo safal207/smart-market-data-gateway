@@ -72,6 +72,8 @@ class Settings(BaseSettings):
     allow_anonymous_dev: bool = True
 
     quote_stream: str = "smdg:quotes:v1"
+    accepted_event_stream: str = "smdg:accepted-quotes:v1"
+    rejected_event_stream: str = "smdg:rejected-quotes:v1"
     quote_pubsub_channel: str = "smdg:quotes:fanout:v1"
     control_stream: str = "smdg:subscriptions:control:v1"
     usage_stream: str = "smdg:usage:v1"
@@ -79,11 +81,21 @@ class Settings(BaseSettings):
     stream_group: str = "smdg:processors:v1"
     control_group: str = "smdg:collectors:v1"
     usage_group: str = "smdg:usage-writers:v1"
+    history_group: str = "smdg:history-writers:v1"
     stream_maxlen: int = 100_000
+    accepted_stream_maxlen: int = 1_000_000
+    rejected_stream_maxlen: int = 100_000
     retry_limit: int = 3
     dedupe_ttl_seconds: int = 3600
 
     quote_freshness_seconds: float = 5.0
+    accepted_event_max_age_seconds: float = 30.0
+    normalization_version: str = "1.0"
+    candle_intervals_seconds: str = "1,10,60,300"
+    candle_allowed_lateness_seconds: float = 2.0
+    history_batch_size: int = 100
+    history_command_timeout_seconds: float = 10.0
+
     subscription_grace_seconds: float = 3.0
     subscription_ttl_seconds: int = 60
     heartbeat_seconds: float = 15.0
@@ -109,6 +121,21 @@ class Settings(BaseSettings):
     @property
     def mock_symbol_list(self) -> list[str]:
         return [symbol.strip().upper() for symbol in self.mock_symbols.split(",") if symbol.strip()]
+
+    @property
+    def candle_intervals(self) -> tuple[int, ...]:
+        intervals = tuple(
+            sorted(
+                {
+                    int(value.strip())
+                    for value in self.candle_intervals_seconds.split(",")
+                    if value.strip()
+                }
+            )
+        )
+        if not intervals or any(interval <= 0 for interval in intervals):
+            raise ValueError("candle_intervals_seconds must contain positive integers")
+        return intervals
 
 
 settings = Settings()
