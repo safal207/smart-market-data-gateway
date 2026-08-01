@@ -7,7 +7,7 @@ from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 import json
 import logging
-from typing import Any, cast
+from typing import Any, Protocol, cast
 from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 from uuid import NAMESPACE_URL, uuid5
 
@@ -58,7 +58,15 @@ class TradernetProviderConfig:
     snapshot_timeout_seconds: float = 10.0
 
 
-WebSocketFactory = Callable[..., Awaitable[Any]]
+class _WebSocketConnection(Protocol):
+    async def send(self, payload: str) -> None: ...
+
+    async def recv(self) -> str | bytes: ...
+
+    async def close(self) -> None: ...
+
+
+WebSocketFactory = Callable[..., Awaitable[_WebSocketConnection]]
 
 
 class TradernetProviderAdapter(MarketDataProvider):
@@ -80,7 +88,7 @@ class TradernetProviderAdapter(MarketDataProvider):
         self.config = config
         self._websocket_factory = websocket_factory or cast(WebSocketFactory, websockets.connect)
         self._http_client = http_client
-        self._websocket: Any | None = None
+        self._websocket: _WebSocketConnection | None = None
         self._state = ProviderState.DISCONNECTED
         self._message: str | None = None
         self._active_symbols: set[str] = set()
@@ -152,10 +160,9 @@ class TradernetProviderAdapter(MarketDataProvider):
         return ProviderHealth(self._state, self._message)
 
     async def events(self) -> AsyncIterator[QuoteEvent]:
-        current_websocket = self._websocket
-        if current_websocket is None or self._state is not ProviderState.CONNECTED:
+        websocket = self._websocket
+        if websocket is None or self._state is not ProviderState.CONNECTED:
             raise TradernetError("Tradernet provider is not connected")
-        websocket: Any = current_websocket
 
         while self._websocket is websocket:
             try:
