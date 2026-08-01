@@ -3,6 +3,8 @@ from decimal import Decimal
 import os
 from uuid import UUID
 
+import pytest
+
 from smart_market_data_gateway.candles import CandleBuilder
 from smart_market_data_gateway.domain import AcceptedQuoteEvent, DataQualityMetadata, QuoteEvent
 from smart_market_data_gateway.history import HistorySink
@@ -35,7 +37,9 @@ async def test_history_sink_persists_events_and_finalized_candles(
     redis_client,
     test_settings,
 ) -> None:
-    database_url = os.environ["TEST_DATABASE_URL"]
+    database_url = os.getenv("TEST_DATABASE_URL")
+    if not database_url:
+        pytest.skip("TEST_DATABASE_URL is required for the history integration test")
     config = test_settings.model_copy(
         update={
             "database_url": database_url,
