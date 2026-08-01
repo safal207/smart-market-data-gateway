@@ -94,7 +94,8 @@ class Settings(BaseSettings):
     normalization_version: str = "1.0"
     candle_intervals_seconds: str = "1,10,60,300"
     candle_allowed_lateness_seconds: float = 2.0
-    history_batch_size: int = 100
+    history_batch_size: int = Field(default=100, gt=0)
+    history_pending_idle_seconds: float = Field(default=30.0, gt=0)
     history_command_timeout_seconds: float = 10.0
     history_failpoint: str | None = None
     enable_history_retention: bool = False
