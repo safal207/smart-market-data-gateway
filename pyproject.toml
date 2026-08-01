@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "smart-market-data-gateway"
-version = "0.2.0"
+version = "0.3.0"
 description = "Adaptive market-data gateway with smart subscription aggregation and tier-based QoS"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -21,6 +21,7 @@ dependencies = [
   "redis>=5.1,<6.0",
   "sqlalchemy>=2.0,<3.0",
   "uvicorn[standard]>=0.32,<1.0",
+  "websockets>=15,<18",
 ]
 
 [project.optional-dependencies]
