@@ -1,9 +1,12 @@
+import asyncio
 import json
 from typing import Any
 
 import httpx
 import pytest
 
+from smart_market_data_gateway.collector import CollectorService
+from smart_market_data_gateway.metrics import GatewayMetrics
 from smart_market_data_gateway.providers import (
     ProviderState,
     TradernetAPIError,
@@ -12,6 +15,7 @@ from smart_market_data_gateway.providers import (
     TradernetProviderAdapter,
     TradernetProviderConfig,
 )
+from smart_market_data_gateway.storage import RedisStore
 
 
 class FakeWebSocket:
@@ -44,6 +48,17 @@ class FakeWebSocketFactory:
         return self.sockets.pop(0)
 
 
+class ControlledWebSocket(FakeWebSocket):
+    def __init__(self) -> None:
+        super().__init__()
+        self.recv_started = asyncio.Event()
+        self.recv_result: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+
+    async def recv(self) -> str:
+        self.recv_started.set()
+        return await self.recv_result
+
+
 def quote_payload() -> dict[str, str]:
     return {
         "c": "aapl.us",
@@ -51,9 +66,9 @@ def quote_payload() -> dict[str, str]:
         "bbp": "147,39",
         "bap": "147,45",
         "ltt": "2026-08-01T12:00:00+00:00",
-        "lts": "10",
-        "trades": "100",
-        "vol": "1000",
+        "lts": "10,5",
+        "trades": "100,0",
+        "vol": "1 000,25",
     }
 
 
@@ -67,6 +82,9 @@ def test_parse_quote_event_and_decimal_commas() -> None:
     assert str(event.price) == "147.42"
     assert str(event.bid) == "147.39"
     assert str(event.ask) == "147.45"
+    assert str(event.last_size) == "10.5"
+    assert str(event.cumulative_volume) == "1000.25"
+    assert event.trade_count == 100
     assert event.provider == "tradernet"
 
 
@@ -113,7 +131,95 @@ async def test_subscription_is_replaced_and_restored_after_reconnect() -> None:
     await provider.disconnect()
     await provider.connect()
     assert json.loads(second.sent[-1]) == ["quotes", ["AAPL.US"]]
+    assert len(second.sent) == 1
+
+    # CollectorService reapplies its desired symbols after connect. The adapter already
+    # restored the list, so an idempotent subscribe must not send the full watch-list twice.
+    await provider.subscribe(["AAPL.US"])
+    assert len(second.sent) == 1
     assert (await provider.health()).state is ProviderState.CONNECTED
+
+
+async def test_collector_offline_unsubscribe_is_not_restored_as_zombie(
+    redis_client,
+    test_settings,
+) -> None:
+    first = FakeWebSocket()
+    second = FakeWebSocket()
+    provider = TradernetProviderAdapter(
+        TradernetProviderConfig(snapshot_fallback=False),
+        websocket_factory=FakeWebSocketFactory([first, second]),
+    )
+    collector = CollectorService(
+        provider,
+        RedisStore(redis_client, test_settings),
+        test_settings,
+        GatewayMetrics(),
+    )
+
+    await collector._apply_control("subscribe", "AAPL.US")
+    await provider.connect()
+    assert json.loads(first.sent[-1]) == ["quotes", ["AAPL.US"]]
+
+    await provider.disconnect()
+    await collector._apply_control("unsubscribe", "AAPL.US")
+    await provider.connect()
+
+    assert provider.active_symbols == frozenset()
+    assert second.sent == []
+    await provider.disconnect()
+
+
+async def test_old_connection_frame_is_fenced_after_reconnect() -> None:
+    first = ControlledWebSocket()
+    second = FakeWebSocket()
+    provider = TradernetProviderAdapter(
+        TradernetProviderConfig(snapshot_fallback=False),
+        websocket_factory=FakeWebSocketFactory([first, second]),
+    )
+    await provider.subscribe(["AAPL.US"])
+    await provider.connect()
+    old_generation = provider.connection_generation
+
+    next_event = asyncio.create_task(anext(provider.events()))
+    await first.recv_started.wait()
+    await provider.connect()
+    assert provider.connection_generation > old_generation
+
+    first.recv_result.set_result(json.dumps(["q", [quote_payload()]]))
+    with pytest.raises(StopAsyncIteration):
+        await next_event
+    assert (await provider.health()).state is ProviderState.CONNECTED
+
+
+async def test_old_snapshot_fallback_cannot_emit_or_degrade_new_connection() -> None:
+    fallback_started = asyncio.Event()
+    release_fallback = asyncio.Event()
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        fallback_started.set()
+        await release_fallback.wait()
+        return httpx.Response(200, json={"result": {"q": {"0": quote_payload()}}})
+
+    first = FakeWebSocket()
+    second = FakeWebSocket()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        provider = TradernetProviderAdapter(
+            TradernetProviderConfig(snapshot_base_url="https://example.test"),
+            websocket_factory=FakeWebSocketFactory([first, second]),
+            http_client=client,
+        )
+        await provider.subscribe(["AAPL.US"])
+        await provider.connect()
+
+        old_fallback = asyncio.create_task(anext(provider.events()))
+        await fallback_started.wait()
+        await provider.connect()
+        release_fallback.set()
+
+        with pytest.raises(StopAsyncIteration):
+            await old_fallback
+        assert (await provider.health()).state is ProviderState.CONNECTED
 
 
 async def test_sid_expiry_is_detected_from_demo_user_data() -> None:

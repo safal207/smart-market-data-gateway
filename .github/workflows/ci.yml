@@ -52,7 +52,9 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -e ".[dev]"
+        run: |
+          python -m pip install --upgrade "pip>=26.1.2,<27"
+          pip install -e ".[dev]"
 
       - name: Ruff lint
         run: ruff check .
@@ -123,6 +125,61 @@ jobs:
         with:
           name: api-contract
           path: openapi.json
+
+  chart-reference:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/chart-reference
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: apps/chart-reference/pnpm-lock.yaml
+
+      - name: Install chart dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Audit chart dependencies
+        run: pnpm audit --audit-level high
+
+      - name: Lint chart reference
+        run: pnpm lint
+
+      - name: Type-check chart reference
+        run: pnpm typecheck
+
+      - name: Unit and component tests
+        run: pnpm test:coverage
+
+      - name: Production build
+        run: pnpm build
+
+      - name: Install Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Responsive and accessibility tests
+        run: pnpm test:e2e
+
+      - name: Upload browser report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chart-reference-playwright-report
+          path: |
+            apps/chart-reference/playwright-report
+            apps/chart-reference/test-results
+          if-no-files-found: ignore
 
   benchmark-smoke:
     runs-on: ubuntu-latest

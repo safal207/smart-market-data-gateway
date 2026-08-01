@@ -1,7 +1,6 @@
 import asyncio
-from datetime import UTC, datetime
-import json
 import logging
+import time
 from typing import Any
 from uuid import uuid4
 
@@ -25,21 +24,27 @@ class QuoteProcessor:
         self.metrics = metrics
         self.consumer_name = f"processor-{uuid4()}"
         self._closed = False
+        self._pending_min_idle_ms = max(5_000, int(self.settings.heartbeat_seconds * 2_000))
+        self._claim_interval_seconds = 1.0
 
     async def run(self) -> None:
         await self.store.ensure_groups()
+        next_claim_at = 0.0
         while not self._closed:
             try:
+                now = time.monotonic()
+                if now >= next_claim_at:
+                    claimed = await self._claim_stale()
+                    self.metrics.redis_pending_entries.set(await self.store.pending_count())
+                    next_claim_at = now + self._claim_interval_seconds
+                    for stream_id, fields in claimed:
+                        await self._process_one(stream_id, fields)
+
                 messages = await self.store.read_group(
                     self.settings.quote_stream,
                     self.settings.stream_group,
                     self.consumer_name,
                 )
-                if not messages:
-                    messages = await self._claim_stale()
-                    self.metrics.redis_pending_entries.set(await self.store.pending_count())
-                    if not messages:
-                        continue
                 for stream_id, fields in messages:
                     await self._process_one(stream_id, fields)
             except asyncio.CancelledError:
@@ -53,7 +58,7 @@ class QuoteProcessor:
             self.settings.quote_stream,
             self.settings.stream_group,
             self.consumer_name,
-            min_idle_time=max(5_000, int(self.settings.heartbeat_seconds * 2000)),
+            min_idle_time=self._pending_min_idle_ms,
             start_id="0-0",
             count=100,
         )
@@ -67,7 +72,8 @@ class QuoteProcessor:
         try:
             payload = fields["payload"]
             event = QuoteEvent.model_validate_json(payload)
-            if not await self.store.accept_event_once(event):
+            result = await self.store.process_quote(event, source_stream_id=stream_id)
+            if result.duplicate:
                 self.metrics.deduplicated_events.inc()
                 await self.store.ack(
                     self.settings.quote_stream,
@@ -76,37 +82,28 @@ class QuoteProcessor:
                 )
                 return
 
-            observation = await self.store.observe_sequence(event)
-            if observation is not None:
-                kind = "out_of_order" if observation.out_of_order else "gap"
+            if result.out_of_order or result.timestamp_regressed or result.gap:
+                if result.out_of_order and result.timestamp_regressed:
+                    kind = "out_of_order_and_timestamp_regression"
+                elif result.out_of_order:
+                    kind = "out_of_order"
+                elif result.timestamp_regressed:
+                    kind = "timestamp_regression"
+                else:
+                    kind = "gap"
                 self.metrics.gap_events.labels(kind).inc()
-                await self.store.redis.set(
-                    f"smdg:stream-health:{event.provider}:{event.symbol}",
-                    json.dumps(
-                        {
-                            "status": "degraded",
-                            "kind": kind,
-                            "previous_sequence": observation.previous_sequence,
-                            "current_sequence": observation.current_sequence,
-                            "gap": observation.gap,
-                            "observed_at": datetime.now(UTC).isoformat(),
-                        }
-                    ),
-                    ex=300,
-                )
                 logger.warning(
-                    "sequence anomaly",
+                    "temporal quote anomaly",
                     extra={
-                        "event": "sequence_anomaly",
+                        "event": "temporal_quote_anomaly",
                         "symbol": event.symbol,
                         "provider": event.provider,
                         "stream_id": stream_id,
                     },
                 )
 
-            await self.store.cache_quote(event)
-            await self.store.publish_fanout(event)
-            self.metrics.provider_events.labels(event.provider).inc()
+            if result.accepted:
+                self.metrics.provider_events.labels(event.provider).inc()
             await self.store.ack(
                 self.settings.quote_stream,
                 self.settings.stream_group,

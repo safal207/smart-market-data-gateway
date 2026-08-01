@@ -82,6 +82,8 @@ class Settings(BaseSettings):
     stream_maxlen: int = 100_000
     retry_limit: int = 3
     dedupe_ttl_seconds: int = 3600
+    quote_timestamp_regression_tolerance_seconds: float = Field(default=1.0, ge=0)
+    quarantine_stream: str = "smdg:quarantine:v1"
 
     quote_freshness_seconds: float = 5.0
     subscription_grace_seconds: float = 3.0

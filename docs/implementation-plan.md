@@ -1,6 +1,6 @@
 # Implementation plan and backlog coverage
 
-This document maps the product backlog to implementation units. The generic gateway is implemented without binding the repository to a commercial provider. A real provider adapter and provider-backed benchmark remain gated by provider selection and licensing review.
+This document maps the product backlog to implementation units. The generic gateway remains provider-independent. A read-only Tradernet/Freedom proof-of-concept adapter now exists, while production provider use and provider-backed benchmark publication remain gated by provider selection and licensing review.
 
 ## Implemented in the full-backlog branch
 
@@ -55,12 +55,18 @@ This document maps the product backlog to implementation units. The generic gate
 - Documented staged path to 10,000 clients.
 - Explicit separation between measured values and extrapolated node/cost estimates.
 
-## Gated next phase: real provider
+## Market Chart Reference vertical slice
+
+The standalone `apps/chart-reference` client exercises the quote contract through deterministic replay or the existing WebSocket gateway. It adds a renderer-independent chart domain, reference-counted browser subscriptions, generation fencing, temporal-integrity diagnostics, client-side candle aggregation, versioned workspace persistence, and a responsive Lightweight Charts renderer.
+
+This slice deliberately does not create a real historical-data store. Replay fixtures are synthetic, and the live lower pane falls back to update count when provider volume semantics are unavailable. See `docs/chart-reference-engine.md`.
+
+## Gated next phase: production provider
 
 1. Compare provider capabilities, market coverage, real-time/delayed status, trial access, rate limits, reliability, and total cost.
 2. Complete `provider-licensing-checklist.md` using the exact contract/terms version.
 3. Select a provider that explicitly permits the intended cache, display, redistribution, non-display, historical, and benchmark uses.
-4. Implement the adapter behind the existing provider contract without changing gateway clients.
+4. Validate and harden the existing read-only adapter behind the provider contract without changing gateway clients.
 5. Add provider-specific contract tests, rate-limit tests, reconnect tests, and payload fixtures that are legally safe to store.
 6. Run the deployed benchmark with the mock source first, then with the real test source under identical infrastructure limits.
 7. Publish raw measurements, environment, commit SHA, assumptions, limitations, and confidence interval.

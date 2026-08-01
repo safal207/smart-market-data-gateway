@@ -8,7 +8,7 @@ version = "0.2.0"
 description = "Adaptive market-data gateway with smart subscription aggregation and tier-based QoS"
 readme = "README.md"
 requires-python = ">=3.12"
-license = { text = "MIT" }
+license = { text = "Apache-2.0" }
 authors = [{ name = "safal207" }]
 dependencies = [
   "asyncpg>=0.30,<1.0",

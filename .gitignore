@@ -11,3 +11,9 @@ htmlcov/
 .idea/
 .vscode/
 .DS_Store
+node_modules/
+dist/
+coverage/
+playwright-report/
+test-results/
+*.tsbuildinfo

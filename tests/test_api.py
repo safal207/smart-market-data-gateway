@@ -64,16 +64,23 @@ def test_websocket_snapshot_subscribe_live_event_and_unsubscribe(test_settings) 
                     "request_id": "sub-1",
                 }
             )
-            snapshot = socket.receive_json()
-            ack = socket.receive_json()
+            subscription_messages = []
+            while len(subscription_messages) < 2:
+                message = socket.receive_json()
+                if message["type"] != "heartbeat":
+                    subscription_messages.append(message)
+            snapshot, ack = subscription_messages
             assert snapshot["type"] == "snapshot"
             assert snapshot["data"]["quote"]["symbol"] == "AAPL"
             assert ack["type"] == "ack"
             assert ack["data"]["symbols"] == ["AAPL"]
+            assert ack["data"]["upstream_transitions"] == ["AAPL"]
 
             live = make_quote(sequence=2)
             redis.publish(test_settings.quote_pubsub_channel, live.model_dump_json())
             quote_message = socket.receive_json()
+            while quote_message["type"] == "heartbeat":
+                quote_message = socket.receive_json()
             assert quote_message["type"] == "quote"
             assert quote_message["data"]["quote"]["sequence"] == 2
 
@@ -85,6 +92,8 @@ def test_websocket_snapshot_subscribe_live_event_and_unsubscribe(test_settings) 
                 }
             )
             unsubscribe_ack = socket.receive_json()
+            while unsubscribe_ack["type"] == "heartbeat":
+                unsubscribe_ack = socket.receive_json()
             assert unsubscribe_ack["type"] == "ack"
             assert unsubscribe_ack["data"]["action"] == "unsubscribe"
 

@@ -15,7 +15,6 @@ from smart_market_data_gateway.providers import (
     MarketDataProvider,
     MockMarketDataProvider,
     MockProviderConfig,
-    ProviderState,
     TradernetMode,
     TradernetProviderAdapter,
     TradernetProviderConfig,
@@ -43,9 +42,12 @@ class CollectorService:
         self.active_symbols: set[str] = set()
         self._closed = False
         self._provider_lock = asyncio.Lock()
+        self._pending_min_idle_ms = max(5_000, int(self.config.heartbeat_seconds * 2_000))
+        self._claim_interval_seconds = 1.0
 
     async def run(self) -> None:
         await self.store.ensure_groups()
+        self.active_symbols.update(await self.store.get_active_upstream_symbols())
         control_task = asyncio.create_task(self._control_loop(), name="collector-control")
         provider_task = asyncio.create_task(self._provider_loop(), name="collector-provider")
         try:
@@ -58,8 +60,16 @@ class CollectorService:
             await self.provider.disconnect()
 
     async def _control_loop(self) -> None:
+        next_claim_at = 0.0
         while not self._closed:
             try:
+                now = time.monotonic()
+                if now >= next_claim_at:
+                    claimed = await self._claim_stale_controls()
+                    next_claim_at = now + self._claim_interval_seconds
+                    for stream_id, fields in claimed:
+                        await self._process_control(stream_id, fields)
+
                 messages = await self.store.read_group(
                     self.config.control_stream,
                     self.config.control_group,
@@ -67,48 +77,68 @@ class CollectorService:
                     count=100,
                 )
                 for stream_id, fields in messages:
-                    action = fields.get("action")
-                    symbol = fields.get("symbol", "").upper()
-                    if action not in {"subscribe", "unsubscribe"} or not symbol:
-                        await self.store.move_to_dead_letter(
-                            source_stream=self.config.control_stream,
-                            stream_id=stream_id,
-                            payload=fields,
-                            error="invalid control message",
-                            retry_count=1,
-                        )
-                        await self.store.ack(
-                            self.config.control_stream,
-                            self.config.control_group,
-                            stream_id,
-                        )
-                        continue
-                    await self._apply_control(action, symbol)
-                    await self.store.ack(
-                        self.config.control_stream,
-                        self.config.control_group,
-                        stream_id,
-                    )
+                    await self._process_control(stream_id, fields)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("control loop failed", extra={"event": "control_loop_failed"})
                 await asyncio.sleep(0.5)
 
+    async def _claim_stale_controls(self) -> list[tuple[str, dict[str, str]]]:
+        claimed = await self.store.redis.xautoclaim(
+            self.config.control_stream,
+            self.config.control_group,
+            self.consumer_name,
+            min_idle_time=self._pending_min_idle_ms,
+            start_id="0-0",
+            count=100,
+        )
+        entries = claimed[1] if isinstance(claimed, (list, tuple)) and len(claimed) > 1 else []
+        result: list[tuple[str, dict[str, str]]] = []
+        for stream_id, fields in entries:
+            result.append((str(stream_id), {str(key): str(value) for key, value in fields.items()}))
+        return result
+
+    async def _process_control(self, stream_id: str, fields: dict[str, str]) -> None:
+        action = fields.get("action")
+        symbol = fields.get("symbol", "").upper()
+        if action not in {"subscribe", "unsubscribe"} or not symbol:
+            await self.store.move_to_dead_letter(
+                source_stream=self.config.control_stream,
+                stream_id=stream_id,
+                payload=fields,
+                error="invalid control message",
+                retry_count=1,
+            )
+            await self.store.ack(
+                self.config.control_stream,
+                self.config.control_group,
+                stream_id,
+            )
+            return
+
+        desired_action = (
+            "subscribe" if await self.store.is_active_upstream_symbol(symbol) else "unsubscribe"
+        )
+        await self._apply_control(desired_action, symbol)
+        await self.store.ack(
+            self.config.control_stream,
+            self.config.control_group,
+            stream_id,
+        )
+
     async def _apply_control(self, action: str, symbol: str) -> None:
         async with self._provider_lock:
-            health = await self.provider.health()
-            connected = health.state is ProviderState.CONNECTED
             if action == "subscribe":
                 was_new = symbol not in self.active_symbols
-                self.active_symbols.add(symbol)
-                if was_new and connected:
+                if was_new:
                     await self.provider.subscribe([symbol])
+                    self.active_symbols.add(symbol)
             else:
                 was_active = symbol in self.active_symbols
-                self.active_symbols.discard(symbol)
-                if was_active and connected:
+                if was_active:
                     await self.provider.unsubscribe([symbol])
+                    self.active_symbols.discard(symbol)
         logger.info(
             "collector control applied",
             extra={

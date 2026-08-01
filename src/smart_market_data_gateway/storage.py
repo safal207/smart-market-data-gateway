@@ -1,8 +1,9 @@
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
 import logging
-from typing import Any
+from typing import Any, Literal, cast
 
 from redis.asyncio import Redis
 from redis.asyncio.client import PubSub
@@ -12,6 +13,142 @@ from smart_market_data_gateway.config import Settings
 from smart_market_data_gateway.domain import GapObservation, QuoteEvent, QuoteSnapshot
 
 logger = logging.getLogger(__name__)
+
+_PROCESS_QUOTE_SCRIPT = """
+local dedupe_ttl = tonumber(ARGV[1])
+local current_sequence = nil
+if ARGV[2] ~= '' then
+  current_sequence = tonumber(ARGV[2])
+end
+local current_timestamp = tonumber(ARGV[3])
+local timestamp_tolerance = tonumber(ARGV[4])
+local payload = ARGV[5]
+local event_id = ARGV[6]
+local provider = ARGV[7]
+local symbol = ARGV[8]
+local observed_at = ARGV[9]
+local source_stream_id = ARGV[10]
+
+local previous_sequence = nil
+local previous_sequence_raw = redis.call('GET', KEYS[2])
+if previous_sequence_raw then
+  previous_sequence = tonumber(previous_sequence_raw)
+end
+local previous_timestamp = nil
+local previous_timestamp_raw = redis.call('GET', KEYS[3])
+if previous_timestamp_raw then
+  previous_timestamp = tonumber(previous_timestamp_raw)
+end
+
+if redis.call('EXISTS', KEYS[1]) == 1 then
+  return {
+    'duplicate', previous_sequence or -1, current_sequence or -1, 0, 0, 0
+  }
+end
+
+local out_of_order = 0
+if current_sequence and previous_sequence and current_sequence <= previous_sequence then
+  out_of_order = 1
+end
+local timestamp_regressed = 0
+if previous_timestamp and current_timestamp + timestamp_tolerance < previous_timestamp then
+  timestamp_regressed = 1
+end
+local gap = 0
+if current_sequence and previous_sequence and current_sequence > previous_sequence + 1 then
+  gap = current_sequence - previous_sequence - 1
+end
+
+local kind = ''
+if out_of_order == 1 and timestamp_regressed == 1 then
+  kind = 'out_of_order_and_timestamp_regression'
+elseif out_of_order == 1 then
+  kind = 'out_of_order'
+elseif timestamp_regressed == 1 then
+  kind = 'timestamp_regression'
+elseif gap > 0 then
+  kind = 'gap'
+end
+
+if out_of_order == 1 or timestamp_regressed == 1 then
+  local diagnostic = cjson.encode({
+    status = 'degraded',
+    kind = kind,
+    previous_sequence = previous_sequence or -1,
+    current_sequence = current_sequence or -1,
+    previous_provider_timestamp_ms = previous_timestamp or -1,
+    current_provider_timestamp_ms = current_timestamp,
+    observed_at = observed_at
+  })
+  redis.call('XADD', KEYS[6], 'MAXLEN', '~', 10000, '*',
+    'event_id', event_id,
+    'provider', provider,
+    'symbol', symbol,
+    'reason', kind,
+    'source_stream_id', source_stream_id,
+    'payload', payload,
+    'diagnostic', diagnostic,
+    'quarantined_at', observed_at
+  )
+  redis.call('SET', KEYS[7], diagnostic, 'EX', 300)
+  redis.call('SET', KEYS[1], 'rejected', 'EX', dedupe_ttl)
+  return {
+    'rejected', previous_sequence or -1, current_sequence or -1,
+    gap, out_of_order, timestamp_regressed
+  }
+end
+
+redis.call('SET', KEYS[4], payload)
+redis.call('PUBLISH', KEYS[5], payload)
+if current_sequence and (not previous_sequence or current_sequence > previous_sequence) then
+  redis.call('SET', KEYS[2], current_sequence, 'EX', 86400)
+end
+if not previous_timestamp or current_timestamp > previous_timestamp then
+  redis.call('SET', KEYS[3], current_timestamp, 'EX', 86400)
+end
+redis.call('SET', KEYS[1], 'accepted', 'EX', dedupe_ttl)
+
+if gap > 0 then
+  local diagnostic = cjson.encode({
+    status = 'degraded',
+    kind = kind,
+    previous_sequence = previous_sequence or -1,
+    current_sequence = current_sequence or -1,
+    gap = gap,
+    previous_provider_timestamp_ms = previous_timestamp or -1,
+    current_provider_timestamp_ms = current_timestamp,
+    observed_at = observed_at
+  })
+  redis.call('SET', KEYS[7], diagnostic, 'EX', 300)
+end
+
+return {
+  'accepted', previous_sequence or -1, current_sequence or -1,
+  gap, out_of_order, timestamp_regressed
+}
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class QuoteProcessingResult:
+    status: Literal["accepted", "duplicate", "rejected"]
+    previous_sequence: int | None
+    current_sequence: int | None
+    gap: int = 0
+    out_of_order: bool = False
+    timestamp_regressed: bool = False
+
+    @property
+    def accepted(self) -> bool:
+        return self.status == "accepted"
+
+    @property
+    def duplicate(self) -> bool:
+        return self.status == "duplicate"
+
+    @property
+    def rejected(self) -> bool:
+        return self.status == "rejected"
 
 
 class RedisStore:
@@ -51,6 +188,23 @@ class RedisStore:
             approximate=True,
         )
         return str(stream_id)
+
+    async def get_active_upstream_symbols(self) -> set[str]:
+        request = cast(
+            Awaitable[set[Any]],
+            self.redis.smembers("smdg:sub:upstream-symbols"),
+        )
+        return {str(symbol).strip().upper() for symbol in await request if str(symbol).strip()}
+
+    async def is_active_upstream_symbol(self, symbol: str) -> bool:
+        request = cast(
+            Awaitable[Any],
+            self.redis.sismember(
+                "smdg:sub:upstream-symbols",
+                symbol.strip().upper(),
+            ),
+        )
+        return bool(await request)
 
     async def read_group(
         self,
@@ -110,6 +264,56 @@ class RedisStore:
                 age_ms=int(age_seconds * 1000),
             )
         return result
+
+    async def process_quote(
+        self,
+        event: QuoteEvent,
+        *,
+        source_stream_id: str = "",
+    ) -> QuoteProcessingResult:
+        """Atomically deduplicate, guard temporal order, cache, and fan out one quote."""
+
+        provider_timestamp_ms = int(event.provider_timestamp.timestamp() * 1000)
+        tolerance_ms = int(self.settings.quote_timestamp_regression_tolerance_seconds * 1000)
+        evaluation = cast(
+            Awaitable[Any],
+            self.redis.eval(
+                _PROCESS_QUOTE_SCRIPT,
+                7,
+                f"smdg:dedupe:{event.event_id}",
+                f"smdg:sequence:{event.provider}:{event.symbol}",
+                f"smdg:provider-timestamp:{event.provider}:{event.symbol}",
+                f"smdg:latest:{event.symbol}",
+                self.settings.quote_pubsub_channel,
+                self.settings.quarantine_stream,
+                f"smdg:stream-health:{event.provider}:{event.symbol}",
+                str(self.settings.dedupe_ttl_seconds),
+                "" if event.sequence is None else str(event.sequence),
+                str(provider_timestamp_ms),
+                str(tolerance_ms),
+                event.model_dump_json(),
+                str(event.event_id),
+                event.provider,
+                event.symbol,
+                datetime.now(UTC).isoformat(),
+                source_stream_id,
+            ),
+        )
+        raw = cast(list[Any], await evaluation)
+        status = str(raw[0])
+        if status not in {"accepted", "duplicate", "rejected"}:
+            raise RuntimeError(f"unexpected quote processing status: {status}")
+
+        previous_sequence_raw = int(raw[1])
+        current_sequence_raw = int(raw[2])
+        return QuoteProcessingResult(
+            status=cast(Literal["accepted", "duplicate", "rejected"], status),
+            previous_sequence=None if previous_sequence_raw < 0 else previous_sequence_raw,
+            current_sequence=None if current_sequence_raw < 0 else current_sequence_raw,
+            gap=int(raw[3]),
+            out_of_order=bool(int(raw[4])),
+            timestamp_regressed=bool(int(raw[5])),
+        )
 
     async def accept_event_once(self, event: QuoteEvent) -> bool:
         accepted = await self.redis.set(

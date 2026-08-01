@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -93,6 +94,8 @@ class TradernetProviderAdapter(MarketDataProvider):
         self._message: str | None = None
         self._active_symbols: set[str] = set()
         self._session_info: dict[str, Any] = {}
+        self._connection_generation = 0
+        self._lifecycle_lock = asyncio.Lock()
 
     @property
     def name(self) -> str:
@@ -106,6 +109,10 @@ class TradernetProviderAdapter(MarketDataProvider):
     def session_info(self) -> Mapping[str, Any]:
         return dict(self._session_info)
 
+    @property
+    def connection_generation(self) -> int:
+        return self._connection_generation
+
     async def connect(self) -> None:
         if self.config.mode is TradernetMode.API_KEY:
             raise NotImplementedError(
@@ -115,75 +122,120 @@ class TradernetProviderAdapter(MarketDataProvider):
         if self.config.mode is TradernetMode.SID_SESSION and not self.config.sid:
             raise TradernetAuthenticationError("SID mode requires SMDG_TRADERNET_SID")
 
-        await self.disconnect()
-        self._state = ProviderState.CONNECTING
-        self._message = None
-        try:
-            self._websocket = await self._websocket_factory(
-                self._connection_url(),
-                open_timeout=self.config.connect_timeout_seconds,
-                close_timeout=5,
-                ping_interval=20,
-                ping_timeout=20,
-                max_queue=1024,
-            )
-            self._state = ProviderState.CONNECTED
-            if self._active_symbols:
-                await self._send_subscription()
-        except Exception as exc:
-            safe_message = self._redact(str(exc))
-            self._state = ProviderState.DISCONNECTED
-            self._message = safe_message
-            raise TradernetError(f"Tradernet connection failed: {safe_message}") from exc
+        async with self._lifecycle_lock:
+            old_websocket = self._websocket
+            self._websocket = None
+            self._connection_generation += 1
+            generation = self._connection_generation
+            self._state = ProviderState.CONNECTING
+            self._message = None
+            if old_websocket is not None:
+                try:
+                    await old_websocket.close()
+                except Exception:
+                    logger.debug("Tradernet websocket close failed", exc_info=True)
+            try:
+                websocket = await self._websocket_factory(
+                    self._connection_url(),
+                    open_timeout=self.config.connect_timeout_seconds,
+                    close_timeout=5,
+                    ping_interval=20,
+                    ping_timeout=20,
+                    max_queue=1024,
+                )
+                self._websocket = websocket
+                self._state = ProviderState.CONNECTED
+                if self._active_symbols:
+                    await self._send_subscription(generation)
+            except Exception as exc:
+                safe_message = self._redact(str(exc))
+                if generation == self._connection_generation:
+                    failed_websocket = self._websocket
+                    self._websocket = None
+                    self._state = ProviderState.DISCONNECTED
+                    self._message = safe_message
+                    if failed_websocket is not None:
+                        try:
+                            await failed_websocket.close()
+                        except Exception:
+                            logger.debug("Tradernet websocket close failed", exc_info=True)
+                raise TradernetError(f"Tradernet connection failed: {safe_message}") from exc
 
     async def disconnect(self) -> None:
-        websocket = self._websocket
-        self._websocket = None
-        self._state = ProviderState.DISCONNECTED
-        if websocket is not None:
-            try:
-                await websocket.close()
-            except Exception:
-                logger.debug("Tradernet websocket close failed", exc_info=True)
+        async with self._lifecycle_lock:
+            websocket = self._websocket
+            self._websocket = None
+            self._connection_generation += 1
+            self._state = ProviderState.DISCONNECTED
+            self._message = None
+            if websocket is not None:
+                try:
+                    await websocket.close()
+                except Exception:
+                    logger.debug("Tradernet websocket close failed", exc_info=True)
 
     async def subscribe(self, symbols: Collection[str]) -> None:
-        self._active_symbols.update(self._normalize_symbols(symbols))
-        if self._state is ProviderState.CONNECTED:
-            await self._send_subscription()
+        normalized = self._normalize_symbols(symbols)
+        async with self._lifecycle_lock:
+            changed = bool(normalized - self._active_symbols)
+            self._active_symbols.update(normalized)
+            if changed and self._state is ProviderState.CONNECTED:
+                await self._send_subscription(self._connection_generation)
 
     async def unsubscribe(self, symbols: Collection[str]) -> None:
-        self._active_symbols.difference_update(self._normalize_symbols(symbols))
-        if self._state is ProviderState.CONNECTED:
-            await self._send_subscription()
+        normalized = self._normalize_symbols(symbols)
+        async with self._lifecycle_lock:
+            changed = bool(normalized & self._active_symbols)
+            self._active_symbols.difference_update(normalized)
+            if changed and self._state is ProviderState.CONNECTED:
+                await self._send_subscription(self._connection_generation)
 
     async def health(self) -> ProviderHealth:
         return ProviderHealth(self._state, self._message)
 
     async def events(self) -> AsyncIterator[QuoteEvent]:
         websocket = self._websocket
+        generation = self._connection_generation
         if websocket is None or self._state is not ProviderState.CONNECTED:
             raise TradernetError("Tradernet provider is not connected")
 
-        while self._websocket is websocket:
+        while self._is_current_connection(websocket, generation):
             try:
                 raw = await websocket.recv()
             except Exception as exc:
+                if not self._is_current_connection(websocket, generation):
+                    return
                 safe_message = self._redact(str(exc))
                 self._state = ProviderState.DEGRADED
                 self._message = f"websocket receive failed: {safe_message}"
                 if self.config.snapshot_fallback and self._active_symbols:
+                    fallback_symbols = frozenset(self._active_symbols)
                     try:
-                        for snapshot in await self.fetch_snapshots(self._active_symbols):
+                        snapshots = await self.fetch_snapshots(fallback_symbols)
+                        if not self._is_current_connection(websocket, generation):
+                            return
+                        for snapshot in snapshots:
+                            if not self._is_current_connection(websocket, generation):
+                                return
+                            if snapshot.symbol not in self._active_symbols:
+                                continue
                             yield snapshot
                     except Exception:
-                        logger.warning(
-                            "Tradernet HTTP snapshot fallback failed",
-                            extra={"event": "tradernet_snapshot_fallback_failed"},
-                            exc_info=True,
-                        )
+                        if self._is_current_connection(websocket, generation):
+                            logger.warning(
+                                "Tradernet HTTP snapshot fallback failed",
+                                extra={"event": "tradernet_snapshot_fallback_failed"},
+                                exc_info=True,
+                            )
+                if not self._is_current_connection(websocket, generation):
+                    return
                 raise TradernetError(self._message) from exc
 
+            if not self._is_current_connection(websocket, generation):
+                return
             for event in self.parse_message(raw):
+                if not self._is_current_connection(websocket, generation):
+                    return
                 yield event
 
     def parse_message(self, raw: str | bytes) -> list[QuoteEvent]:
@@ -264,11 +316,18 @@ class TradernetProviderAdapter(MarketDataProvider):
         encoded = "+".join(quote(symbol, safe="./:_-") for symbol in sorted(symbols))
         return f"{self.config.snapshot_base_url.rstrip('/')}/securities/export?tickers={encoded}"
 
-    async def _send_subscription(self) -> None:
+    async def _send_subscription(self, generation: int) -> None:
         websocket = self._websocket
-        if websocket is None:
+        if websocket is None or generation != self._connection_generation:
             raise TradernetError("Tradernet provider is not connected")
         await websocket.send(json.dumps(["quotes", sorted(self._active_symbols)]))
+
+    def _is_current_connection(
+        self,
+        websocket: _WebSocketConnection,
+        generation: int,
+    ) -> bool:
+        return self._websocket is websocket and self._connection_generation == generation
 
     def _handle_user_data(self, payload: Any) -> None:
         if not isinstance(payload, dict):
@@ -345,6 +404,9 @@ class TradernetProviderAdapter(MarketDataProvider):
         bid = cls._positive_decimal(row.get("bbp"))
         ask = cls._positive_decimal(row.get("bap"))
         price = cls._positive_decimal(row.get("ltp"))
+        last_size = cls._non_negative_decimal(row.get("lts"))
+        cumulative_volume = cls._non_negative_decimal(row.get("vol"))
+        trade_count = cls._non_negative_integer(row.get("trades"))
         if price is None and bid is not None and ask is not None:
             price = (bid + ask) / Decimal(2)
         price = price or bid or ask
@@ -375,6 +437,9 @@ class TradernetProviderAdapter(MarketDataProvider):
                 price=price,
                 bid=bid,
                 ask=ask,
+                last_size=last_size,
+                cumulative_volume=cumulative_volume,
+                trade_count=trade_count,
                 provider_timestamp=provider_timestamp,
                 received_at=received_at,
                 provider="tradernet",
@@ -388,13 +453,25 @@ class TradernetProviderAdapter(MarketDataProvider):
 
     @staticmethod
     def _positive_decimal(value: Any) -> Decimal | None:
+        parsed = TradernetProviderAdapter._non_negative_decimal(value)
+        return parsed if parsed is not None and parsed > 0 else None
+
+    @staticmethod
+    def _non_negative_decimal(value: Any) -> Decimal | None:
         if value is None or value == "" or value == "-":
             return None
         try:
             parsed = Decimal(str(value).replace(" ", "").replace(",", "."))
         except (InvalidOperation, ValueError):
             return None
-        return parsed if parsed > 0 else None
+        return parsed if parsed.is_finite() and parsed >= 0 else None
+
+    @staticmethod
+    def _non_negative_integer(value: Any) -> int | None:
+        parsed = TradernetProviderAdapter._non_negative_decimal(value)
+        if parsed is None or parsed != parsed.to_integral_value():
+            return None
+        return int(parsed)
 
     @staticmethod
     def _provider_timestamp(value: Any, received_at: datetime) -> datetime:

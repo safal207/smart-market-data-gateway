@@ -60,6 +60,25 @@ Redis Streams provide durable, acknowledged processing. Redis Pub/Sub broadcasts
 
 Critical transactional events such as order statuses, trade confirmations, risk events, and critical alerts are deliberately excluded from quote-throttling and replacement semantics.
 
+## Market Chart Reference Engine
+
+`apps/chart-reference` is a standalone React and Lightweight Charts 5.2 reference client built on top of the gateway contract. It defaults to deterministic synthetic replay and demonstrates:
+
+- one physical subscription shared by multiple consumers;
+- reconnect generation fencing and stale-event rejection;
+- duplicate, sequence, and timestamp-integrity diagnostics;
+- deterministic client-side candles with a volume/update-count pane;
+- precision-safe prices, crosshair OHLC, versioned workspace persistence, and responsive layout;
+- an optional read-only connection to the existing `/v1/stream` WebSocket.
+
+```bash
+cd apps/chart-reference
+pnpm install --frozen-lockfile
+pnpm dev
+```
+
+See [Market Chart Reference Engine](docs/chart-reference-engine.md) for the architecture, integrity rules, gateway setup, tests, and explicit licensing boundaries. Real Tradernet history is not stored by this app.
+
 ## Run the complete local stack
 
 ```bash
@@ -228,6 +247,7 @@ The CI smoke benchmark uploads raw JSON and Markdown artifacts. Synthetic, deplo
 - [Public API compatibility manifest](contracts/public-api-v1.json)
 - [Benchmark methodology](docs/benchmark-methodology.md)
 - [Tradernet/Freedom adapter](docs/providers/tradernet.md)
+- [Market Chart Reference Engine](docs/chart-reference-engine.md)
 - [Provider licensing checklist](docs/provider-licensing-checklist.md)
 
 ## Licensing warning

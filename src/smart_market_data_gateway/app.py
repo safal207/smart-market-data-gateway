@@ -419,10 +419,13 @@ def create_app(config: Settings | None = None) -> FastAPI:
                             identity.tier,
                             len(session.subscriptions | symbols),
                         )
-                        global_added = await websocket.app.state.subscriptions.subscribe(
-                            connection_id,
-                            symbols,
+                        subscription_result = (
+                            await websocket.app.state.subscriptions.subscribe_with_transitions(
+                                connection_id,
+                                symbols,
+                            )
                         )
+                        global_added = subscription_result.added_symbols
                         try:
                             local_added = await websocket.app.state.hub.subscribe(
                                 connection_id,
@@ -451,7 +454,9 @@ def create_app(config: Settings | None = None) -> FastAPI:
                                 data={
                                     "action": "subscribe",
                                     "symbols": sorted(local_added),
-                                    "upstream_transitions": sorted(global_added),
+                                    "upstream_transitions": sorted(
+                                        subscription_result.upstream_transitions
+                                    ),
                                 },
                             )
                         )

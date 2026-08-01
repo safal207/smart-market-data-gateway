@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 Symbol = Annotated[str, Field(min_length=1, max_length=32, pattern=r"^[A-Z0-9._:-]+$")]
 PositiveDecimal = Annotated[Decimal, Field(gt=0)]
+NonNegativeDecimal = Annotated[Decimal, Field(ge=0)]
 NonNegativeInteger = Annotated[int, Field(ge=0)]
 
 
@@ -28,6 +29,9 @@ class QuoteEvent(BaseModel):
     price: PositiveDecimal
     bid: PositiveDecimal | None = None
     ask: PositiveDecimal | None = None
+    last_size: NonNegativeDecimal | None = None
+    cumulative_volume: NonNegativeDecimal | None = None
+    trade_count: NonNegativeInteger | None = None
     provider_timestamp: datetime
     received_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     sequence: NonNegativeInteger | None = None

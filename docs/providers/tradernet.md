@@ -13,7 +13,7 @@ The following facts are supported by the current Tradernet documentation snapsho
   "quotes", ["AAPL.US", "MSFT.US"]
 ]`.
 - Quote updates arrive as event `q`; the adapter also accepts `quotes` for compatibility with previously observed traffic.
-- Quote fields include `c` (ticker), `ltp` (last price), `bbp` (best bid), `bap` (best ask), and `ltt` (last trade time).
+- Quote fields include `c` (ticker), `ltp` (last price), `bbp` (best bid), `bap` (best ask), `ltt` (last trade time), and optional `lts`, `vol`, and `trades` activity fields.
 - On connection the server can emit `userData` with `isDemo` and `mode`.
 - A rejected or expired SID can silently fall back to demo mode; strict SID mode therefore treats demo `userData` as authentication failure.
 - Public HTTP snapshots are available from `/securities/export?tickers=...`.
@@ -43,19 +43,20 @@ No credential is placed in URLs written to logs, reports, fixtures, or benchmark
 - Symbols are upper-cased and retain exchange suffixes such as `AAPL.US`.
 - Decimal commas are converted to decimal points.
 - Price selection order is `ltp`, bid/ask midpoint, bid, ask.
+- Non-negative `lts`, `vol`, and integral `trades` values are retained as `last_size`, `cumulative_volume`, and `trade_count`. `cumulative_volume` is not treated as a per-tick volume delta.
 - Tradernet does not provide a stable event ID in documented quote events. A deterministic UUID is derived from ticker, price fields, trade time, size, volume, and trade count so identical frames can be deduplicated.
 - Documented `ltt` examples have no timezone. Timezone-aware values are preserved; timezone-free values use gateway receive time. This avoids producing false exchange-latency measurements.
 - No sequence number is invented. Gap detection remains available when a future payload supplies a real sequence.
 
 ## Snapshot fallback
 
-When the WebSocket receive loop fails, the adapter can fetch one current HTTP snapshot for all active symbols before the collector reconnects. The fallback is controlled by:
+When the WebSocket receive loop fails, the adapter can fetch one current HTTP snapshot for all active symbols before the collector reconnects. Every connection has a monotonically increasing generation; a receive or snapshot belonging to an older generation is discarded and cannot degrade the new connection. The fallback is controlled by:
 
 ```env
 SMDG_TRADERNET_SNAPSHOT_FALLBACK=true
 ```
 
-The collector still owns exponential backoff and subscription restoration.
+The collector still owns exponential backoff and desired-subscription restoration. The adapter suppresses unchanged watch-list writes, so reconnect restoration sends the full desired list once rather than once in `connect()` and again in `subscribe()`.
 
 ## Local setup
 
