@@ -55,6 +55,12 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[dev]"
 
+      - name: Apply database migrations
+        run: smdg-migrate --migrations-dir migrations
+
+      - name: Verify migration idempotency
+        run: smdg-migrate --migrations-dir migrations
+
       - name: Ruff lint
         run: ruff check .
 
@@ -64,8 +70,9 @@ jobs:
       - name: Unit, integration, and contract tests
         run: pytest
 
-      - name: Validate replay and integrity CLIs
+      - name: Validate migration, replay, and integrity CLIs
         run: |
+          smdg-migrate --help >/dev/null
           smdg-replay --help >/dev/null
           smdg-verify-history --help >/dev/null
 
