@@ -219,6 +219,44 @@ def test_base_workflow_validator_execution_cannot_be_replaced_by_head_tool() -> 
     assert_rejected(mutated, "fixed base-side execution")
 
 
+def test_base_trust_checker_failure_cannot_be_masked_with_or_true() -> None:
+    mutated = workflow_text().replace(
+        "              --output artifacts/causal/trust-root-verification.json\n          elif",
+        "              --output artifacts/causal/trust-root-verification.json || true\n          elif",
+        1,
+    )
+    assert_rejected(mutated, "shell-level failure masking")
+
+
+def test_errexit_cannot_be_disabled_in_base_tool_step() -> None:
+    mutated = workflow_text().replace(
+        "      - name: Verify exact-tree trust root with base checker\n"
+        "        shell: bash\n"
+        "        env:\n"
+        "          BASE_SHA: ${{ github.event.pull_request.base.sha }}\n"
+        "        run: |\n"
+        "          set -euo pipefail\n",
+        "      - name: Verify exact-tree trust root with base checker\n"
+        "        shell: bash\n"
+        "        env:\n"
+        "          BASE_SHA: ${{ github.event.pull_request.base.sha }}\n"
+        "        run: |\n"
+        "          set -euo pipefail\n"
+        "          set +e\n",
+        1,
+    )
+    assert_rejected(mutated, "shell-level failure masking")
+
+
+def test_trailing_success_after_base_tool_conditional_is_rejected() -> None:
+    mutated = workflow_text().replace(
+        "            exit 1\n          fi\n\n      - name: Set up Python",
+        "            exit 1\n          fi\n          true\n\n      - name: Set up Python",
+        1,
+    )
+    assert_rejected(mutated, "must end at the fail-closed conditional")
+
+
 def test_removing_base_bound_analyzer_is_rejected() -> None:
     mutated = workflow_text().replace(
         'git show "${BASE_SHA}:scripts/ci/build_causal_pr_report.py"',
