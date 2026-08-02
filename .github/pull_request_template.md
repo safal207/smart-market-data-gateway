@@ -20,13 +20,14 @@ Describe the smallest reviewable transition in this pull request.
 
 ## Review evidence
 
-<!-- Record the automated reviewer(s), the exact reviewed head SHA, and how each actionable finding was resolved. One available independent automated reviewer is sufficient for a solo maintainer; two are preferred for trust-root changes. -->
+<!-- Record the automated reviewer(s), the exact reviewed head SHA, the reviewed material PR-body version, and how each actionable finding was resolved. One available independent automated reviewer is sufficient for a solo maintainer; two are preferred for trust-root changes. -->
 
 ## Operational notes
 
 - [ ] No force-push or history rewrite was used.
 - [ ] No protection, scan, required check, or causal boundary was weakened.
 - [ ] Evidence is bound to the exact PR head SHA.
-- [ ] At least one available automated reviewer inspected the current exact head SHA.
+- [ ] At least one available automated reviewer inspected the current exact head SHA and current material causal sections.
+- [ ] A new review was requested after every new commit or material causal-section edit.
 - [ ] No unresolved actionable review finding remains.
 - [ ] The repository owner retains manual merge authority.
