@@ -8,7 +8,7 @@
     "scripts/ci/check_causal_workflow_contract.py": "dca6d32582db13e470c2bc69c9f411271a57274e",
     "tests/test_causal_pr_contract.py": "f361b9cf9f65b1867aa95e42dace5a1755fc9731",
     "tests/test_causal_trust_root.py": "75bc3dc87aa1d1868d43d7f5f7340a2fabb86271",
-    "tests/test_causal_workflow_contract.py": "9b16b5d4af4360bac1e5ad3de86acb008f2d2d43"
+    "tests/test_causal_workflow_contract.py": "db6f50de27e18fb7babd9f78f032d495a10836e0"
   },
   "schema_version": 1
 }
