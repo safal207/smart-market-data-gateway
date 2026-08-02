@@ -112,6 +112,8 @@ def validate_workflow_text(text: str, *, default_branch: str = "main") -> None:
     if len(gate_jobs) != 1:
         raise ContractError(f"exactly one job must expose stable check name '{EXACT_CHECK_NAME}'")
     gate = gate_jobs[0]
+    if "if" in gate:
+        raise ContractError("Causal PR Gate job must not define an if condition")
     if not str(gate.get("timeout-minutes", "")).isdigit():
         raise ContractError("Causal PR Gate job must have timeout-minutes")
     gate_permissions = as_mapping(gate.get("permissions"), "Causal PR Gate permissions")
