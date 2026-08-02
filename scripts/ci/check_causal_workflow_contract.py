@@ -88,14 +88,50 @@ def all_steps(workflow: dict[str, Any]) -> list[dict[str, Any]]:
     return steps
 
 
-def require_bootstrap_guard(command: str, label: str) -> None:
-    required = (
-        'elif [[ "${BASE_SHA}" == "${BOOTSTRAP_BASE_SHA}" ]]; then',
-        "exit 1",
-    )
-    for fragment in required:
-        if fragment not in command:
-            raise ContractError(f"{label} must fail closed outside the exact bootstrap base")
+def require_base_bound_execution(
+    command: str,
+    *,
+    label: str,
+    source_path: str,
+    extracted_name: str,
+) -> None:
+    extraction = f'git show "${{BASE_SHA}}:{source_path}"'
+    destination = f'> "${{RUNNER_TEMP}}/{extracted_name}"'
+    base_execution = f'python "${{RUNNER_TEMP}}/{extracted_name}"'
+    bootstrap_guard = 'elif [[ "${BASE_SHA}" == "${BOOTSTRAP_BASE_SHA}" ]]; then'
+    bootstrap_execution = f"python {source_path}"
+
+    required_once = {
+        "base extraction": extraction,
+        "fixed extraction destination": destination,
+        "fixed base-side execution": base_execution,
+        "exact bootstrap guard": bootstrap_guard,
+        "bootstrap head-side execution": bootstrap_execution,
+    }
+    for description, fragment in required_once.items():
+        if command.count(fragment) != 1:
+            raise ContractError(f"{label} must contain exactly one {description}")
+
+    extraction_index = command.index(extraction)
+    destination_index = command.index(destination)
+    base_execution_index = command.index(base_execution)
+    guard_index = command.index(bootstrap_guard)
+    bootstrap_execution_index = command.index(bootstrap_execution)
+
+    if not (
+        extraction_index
+        < destination_index
+        < base_execution_index
+        < guard_index
+        < bootstrap_execution_index
+    ):
+        raise ContractError(
+            f"{label} must execute the extracted exact base-SHA tool before the bootstrap branch"
+        )
+    if bootstrap_execution in command[:guard_index]:
+        raise ContractError(f"{label} must not execute the head-side tool in the established branch")
+    if "exit 1" not in command[bootstrap_execution_index:]:
+        raise ContractError(f"{label} must fail closed outside the exact bootstrap base")
 
 
 def validate_workflow_text(text: str, *, default_branch: str = "main") -> None:
@@ -191,9 +227,12 @@ def validate_workflow_text(text: str, *, default_branch: str = "main") -> None:
     if len(analyzer_steps) != 1:
         raise ContractError("workflow must run build_causal_pr_report.py exactly once")
     analyzer_command = str(analyzer_steps[0].get("run", ""))
-    if 'git show "${BASE_SHA}:scripts/ci/build_causal_pr_report.py"' not in analyzer_command:
-        raise ContractError("causal analysis must prefer the exact base-SHA analyzer")
-    require_bootstrap_guard(analyzer_command, "causal analyzer selection")
+    require_base_bound_execution(
+        analyzer_command,
+        label="causal analyzer selection",
+        source_path="scripts/ci/build_causal_pr_report.py",
+        extracted_name="build_causal_pr_report.base.py",
+    )
     required_fragments = (
         '--base-sha "${{ github.event.pull_request.base.sha }}"',
         '--head-sha "${{ github.event.pull_request.head.sha }}"',
@@ -202,8 +241,10 @@ def validate_workflow_text(text: str, *, default_branch: str = "main") -> None:
         '--run-attempt "${{ github.run_attempt }}"',
     )
     for fragment in required_fragments:
-        if fragment not in analyzer_command:
-            raise ContractError(f"analyzer command missing exact provenance argument: {fragment}")
+        if analyzer_command.count(fragment) != 2:
+            raise ContractError(
+                f"analyzer command must pass provenance in established and bootstrap branches: {fragment}"
+            )
 
     trust_steps = [
         step
@@ -213,17 +254,22 @@ def validate_workflow_text(text: str, *, default_branch: str = "main") -> None:
     if len(trust_steps) != 1:
         raise ContractError("workflow must run check_causal_trust_root.py exactly once")
     trust_command = str(trust_steps[0].get("run", ""))
-    if 'git show "${BASE_SHA}:scripts/ci/check_causal_trust_root.py"' not in trust_command:
-        raise ContractError("trust-root validation must prefer the exact base-SHA checker")
-    require_bootstrap_guard(trust_command, "trust-root checker selection")
+    require_base_bound_execution(
+        trust_command,
+        label="trust-root checker selection",
+        source_path="scripts/ci/check_causal_trust_root.py",
+        extracted_name="check_causal_trust_root.base.py",
+    )
     for fragment in (
         '--base-sha "${{ github.event.pull_request.base.sha }}"',
         '--head-sha "${{ github.event.pull_request.head.sha }}"',
         "--manifest-path .github/causal-trust-root.json",
         "--output artifacts/causal/trust-root-verification.json",
     ):
-        if fragment not in trust_command:
-            raise ContractError(f"trust-root command missing required argument: {fragment}")
+        if trust_command.count(fragment) != 2:
+            raise ContractError(
+                f"trust-root command must pass required arguments in both branches: {fragment}"
+            )
 
     validator_steps = [
         step
@@ -233,9 +279,14 @@ def validate_workflow_text(text: str, *, default_branch: str = "main") -> None:
     if len(validator_steps) != 1:
         raise ContractError("workflow must run the workflow contract validator exactly once")
     validator_command = str(validator_steps[0].get("run", ""))
-    if 'git show "${BASE_SHA}:scripts/ci/check_causal_workflow_contract.py"' not in validator_command:
-        raise ContractError("workflow validation must prefer the exact base-SHA validator")
-    require_bootstrap_guard(validator_command, "workflow validator selection")
+    require_base_bound_execution(
+        validator_command,
+        label="workflow validator selection",
+        source_path="scripts/ci/check_causal_workflow_contract.py",
+        extracted_name="check_causal_workflow_contract.base.py",
+    )
+    if validator_command.count(".github/workflows/causal-pr-gate.yml") != 2:
+        raise ContractError("workflow validator must inspect the candidate workflow in both branches")
 
     test_steps = [
         step
