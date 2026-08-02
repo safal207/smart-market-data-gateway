@@ -25,20 +25,25 @@ The analyzer rejects a stale event, a different checkout SHA, a missing Git obje
 
 The classified diff compares the exact base tree directly with the exact head tree. It does not use the merge base, because changes present only on an advanced base are still part of the declared base-to-head tree transition.
 
-For established installations, the workflow loads the analyzer, workflow validator, trust-root checker, and manifest from the exact base SHA. A pull request therefore cannot weaken the validator and immediately use the weaker head version to approve the same transition.
+For established installations, the workflow loads the analyzer, workflow validator, trust-root checker, and manifest from the exact base SHA. The head-tree fallback is authorized only for the single recorded bootstrap base SHA; every other missing base validator fails closed.
 
 ## Exact-tree trust root
 
-`.github/causal-trust-root.json` stores the exact Git blob IDs of the protected causal-CI tree:
+`.github/causal-trust-root.json` stores the exact Git blob IDs of the complete protected causal-CI tree:
 
-- the permanent workflow;
-- the causal report analyzer;
-- the workflow contract validator;
-- the trust-root checker;
-- causal contract tests;
-- workflow mutation tests;
-- exact-tree trust-root tests;
-- selected CI and ownership surfaces.
+- `.github/CODEOWNERS`;
+- `.github/pull_request_template.md`;
+- `.github/workflows/causal-pr-gate.yml`;
+- `.github/workflows/ci.yml`;
+- `AGENTS.md`;
+- `docs/ci/CAUSAL_PR_GATE.md`;
+- `pyproject.toml`;
+- `scripts/ci/build_causal_pr_report.py`;
+- `scripts/ci/check_causal_workflow_contract.py`;
+- `scripts/ci/check_causal_trust_root.py`;
+- `tests/test_causal_pr_contract.py`;
+- `tests/test_causal_workflow_contract.py`;
+- `tests/test_causal_trust_root.py`.
 
 The IDs are obtained from the actual Git tree, not calculated or copied by inspection.
 
@@ -47,15 +52,16 @@ In established mode:
 1. the checker itself is loaded from the exact base SHA;
 2. the base manifest blob must remain unchanged in the head;
 3. every protected head file must have the blob ID declared by the base manifest;
-4. any mismatch fails closed and requires a separate trust-root bootstrap.
+4. deletion of a protected file fails closed;
+5. any mismatch requires a separate trust-root bootstrap.
 
-This prevents an ordinary pull request from changing the workflow, validator, checker, manifest, and tests together to manufacture a false green result.
+This prevents an ordinary pull request from changing the workflow, validator, checker, manifest, tests, review rules, or package/test configuration together to manufacture a false green result.
 
 ## Modes
 
 ### STRICT
 
-STRICT mode applies when the diff contains runtime, API, CLI, schema, packaging, scripts, security, workflows, or unclassified files.
+STRICT mode applies when the exact-tree diff contains runtime, API, CLI, schema, packaging, scripts, security, workflows, or unclassified files.
 
 The pull-request body must contain substantive values for:
 
@@ -66,18 +72,18 @@ The pull-request body must contain substantive values for:
 ### Residual risk
 ```
 
-Empty sections, HTML-only templates, and explicit values such as `TODO`, `TBD`, `placeholder`, or `describe` fail closed. Ordinary sentences containing words such as `non-placeholder` are accepted.
+Empty sections, HTML-only templates, and explicit values such as `TODO`, `TBD`, `placeholder`, or `describe` fail closed. Ordinary sentences containing words such as `non-placeholder` are accepted. Headings inside fenced or indented code do not count as causal sections.
 
 Executable changes require either:
 
 - a changed test file; or
 - an exact existing repository test path in `Regression evidence`.
 
-Workflow and CI-validator changes additionally require a changed causal, workflow, contract, or mutation test.
+Workflow changes and every Python validator under `scripts/ci/` additionally require a changed causal, workflow, contract, trust-root, or mutation test.
 
 ### LIGHTWEIGHT
 
-LIGHTWEIGHT mode applies only when every affected path is documentation. Exact SHA, clean-worktree, exact-tree diff, provenance, and evidence generation still run. The four causal sections are optional.
+LIGHTWEIGHT mode applies only when every affected source and destination path is documentation. Exact SHA, clean-worktree, exact-tree diff, provenance, and evidence generation still run. The four causal sections are optional.
 
 Renames are classified by both source and destination. A move from executable code into documentation remains `STRICT`; only documentation-to-documentation renames can remain `LIGHTWEIGHT`.
 
@@ -93,7 +99,7 @@ flowchart LR
   D --> E[exact head SHA]
 ```
 
-This graph is an audit summary. It does not claim philosophical or scientific causality; it records the asserted software failure path, invariant, and evidence for one exact Git transition.
+PR-controlled labels are sanitized for secrets, URLs, quotes, backticks, and fence-breaking characters before they enter the Mermaid block. The graph is an audit summary, not a claim of philosophical or scientific causality.
 
 ## Evidence artifacts
 
@@ -111,7 +117,7 @@ Artifact identity includes:
 - GitHub run ID;
 - GitHub run attempt.
 
-Uploads use `if-no-files-found: error`. The report does not copy the full PR body. URLs, common token formats, passwords, API keys, and private-key headers are redacted from Markdown and error details.
+Uploads use `if-no-files-found: error`. The report does not copy the full PR body. URLs, common token formats, passwords, API keys, private-key headers, and Markdown fence-breaking values are redacted or escaped.
 
 ## Fork safety
 
@@ -132,14 +138,14 @@ Mutation tests reject:
 - a changed stable check name;
 - removal of the `edited` event;
 - weakened permissions;
+- non-positive or non-ASCII timeouts;
 - job-level or step-level conditions that can skip required gate work;
 - `continue-on-error` on workflow steps;
-- removal of the base-bound trust-root checker;
-- removal of the exact-tree regression test.
+- removal or broadening of the one authorized bootstrap boundary;
+- removal of the base-bound analyzer, trust-root checker, or workflow validator;
+- removal of the exact-tree regression tests.
 
-All external actions are pinned to full 40-character commit SHAs. Jobs have explicit timeouts and minimum permissions. Concurrency cancels stale runs for the same PR.
-
-`CODEOWNERS` identifies trust surfaces and becomes an enforceable approval boundary only when repository settings require code-owner review. Solo-maintainer repositories are not required to enable that setting.
+All external actions are pinned to full 40-character commit SHAs. Jobs have explicit positive timeouts and minimum permissions. Concurrency cancels stale runs for the same PR.
 
 ## Automated review policy for solo maintainers
 
@@ -149,13 +155,13 @@ The merge protocol is:
 
 1. request review from at least one available independent automated reviewer, such as Codex or CodeRabbit;
 2. prefer two different reviewers for trust-root changes when both are available, but do not make the second reviewer a permanent availability dependency;
-3. bind every request and conclusion to the current exact head SHA;
-4. after any new commit, discard stale conclusions and request review again;
+3. bind every request and conclusion to the current exact head SHA and current material PR-body assertions;
+4. after any new commit or material edit to the four causal sections or finding-resolution record, discard stale conclusions and request review again;
 5. resolve every actionable finding and leave no unresolved review thread;
-6. require `Causal PR Gate`, repository CI, security scans, and applicable CodeQL jobs to pass on the same head;
+6. require `Causal PR Gate`, repository CI, security scans, applicable CodeQL, and benchmark jobs to pass on the same head;
 7. let the repository owner make the final merge decision manually.
 
-A reviewer that is unavailable, rate-limited, or unable to inspect a Draft PR must be reported honestly. It does not permanently block a solo maintainer when another reviewer has completed the exact-head review and the causal evidence is green.
+A reviewer that is unavailable, rate-limited, or unable to inspect a Draft PR must be reported honestly. It does not permanently block a solo maintainer when another reviewer has completed the current exact-head and current-body review and the causal evidence is green.
 
 Review agents provide adversarial analysis, not merge authority. No bot, artifact, approval comment, or green status may trigger automatic merge by itself.
 
@@ -172,11 +178,11 @@ A stale-head failure means the report was requested for a SHA different from the
 
 ## Bootstrap boundary
 
-The repository had no pre-existing in-tree protected-files manifest before version 1. This bootstrap therefore reads the new checker and manifest from the exact head because the exact base SHA cannot contain them.
+The repository had no pre-existing in-tree protected-files manifest before version 1. This bootstrap reads the new checker and manifest from the exact head only when the base SHA equals the single recorded bootstrap base. Any other missing base validator fails closed.
 
-After bootstrap merge, future ordinary PRs use the exact base checker and base manifest. A later legitimate trust-root replacement must be a separate bootstrap. The old trust-root gate may and should reject that replacement because the current root cannot grant authority to its own successor. That single red trust-root result is an expected bootstrap boundary and must not be disabled or bypassed.
+After bootstrap merge, future ordinary PRs use the exact base checker and base manifest. A later legitimate trust-root replacement must be a separate bootstrap. The old trust-root gate may and should reject that replacement because the current root cannot grant authority to its own successor. That red trust-root result is an expected bootstrap boundary and must not be disabled or bypassed.
 
-The bootstrap remains a separate Draft PR until the owner intentionally marks it ready. It is not mixed into a feature PR. For a solo maintainer, merge requires an exact-head automated review from at least one available reviewer, green causal evidence, green non-bootstrap checks, and resolution of all findings. Two automated reviewers are preferred for trust-root changes when available. The owner alone performs the manual merge.
+For a solo maintainer, merge requires a review of the current exact head and current material PR body from at least one available automated reviewer, green causal evidence, green non-bootstrap checks, and resolution of all findings. Two automated reviewers are preferred for trust-root changes when available. The owner alone performs the manual merge.
 
 ## Residual limits
 
@@ -184,7 +190,7 @@ The gate does not independently control GitHub branch rules. A repository admini
 
 The owner must complete the final enforcement step after merge:
 
-1. inspect the exact-head automated review and causal evidence, then merge manually;
-2. add `Causal PR Gate` to required status checks on the default branch;
+1. add `Causal PR Gate` to required status checks on the default branch;
+2. require pull requests to be up to date with the default branch;
 3. keep force-push disabled on the default branch;
 4. enable human or code-owner approval later when a real team exists and the repository wants that additional boundary.
