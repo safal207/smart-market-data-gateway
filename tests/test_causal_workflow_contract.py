@@ -115,8 +115,8 @@ def test_removing_base_bound_trust_checker_is_rejected() -> None:
 
 def test_removing_exact_tree_test_is_rejected() -> None:
     mutated = workflow_text().replace(
-        "            tests/test_causal_trust_root.py \\\n",
-        "",
+        "tests/test_causal_trust_root.py",
+        "tests/test_removed_trust_root.py",
         1,
     )
     assert_rejected(mutated, "targeted causal tests missing")
