@@ -13,7 +13,13 @@ import subprocess
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 BLOB_RE = re.compile(r"^[0-9a-f]{40}$")
 REQUIRED_PROTECTED_PATHS = {
+    ".github/CODEOWNERS",
+    ".github/pull_request_template.md",
     ".github/workflows/causal-pr-gate.yml",
+    ".github/workflows/ci.yml",
+    "AGENTS.md",
+    "docs/ci/CAUSAL_PR_GATE.md",
+    "pyproject.toml",
     "scripts/ci/build_causal_pr_report.py",
     "scripts/ci/check_causal_workflow_contract.py",
     "scripts/ci/check_causal_trust_root.py",
