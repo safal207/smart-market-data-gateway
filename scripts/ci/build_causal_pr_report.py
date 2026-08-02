@@ -23,6 +23,7 @@ PLACEHOLDER_RE = re.compile(
     r"(?:[\s:;,.!\-]*)$",
     re.IGNORECASE,
 )
+MARKDOWN_HEADING_RE = re.compile(r"^\s*(#{1,6})\s+(.+?)\s*$")
 URL_RE = re.compile(r"https?://[^\s)>\]}]+", re.IGNORECASE)
 SECRET_PATTERNS = (
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
@@ -129,9 +130,10 @@ def parse_causal_sections(body: str) -> dict[str, str]:
     sections: dict[str, list[str]] = {title: [] for title in SECTION_TITLES}
     active: str | None = None
     for line in body.splitlines():
-        heading = re.match(r"^\s*###\s+(.+?)\s*$", line)
+        heading = MARKDOWN_HEADING_RE.match(line)
         if heading:
-            active = headings.get(heading.group(1).strip().casefold())
+            level, title = heading.groups()
+            active = headings.get(title.strip().casefold()) if len(level) == 3 else None
             continue
         if active is not None:
             sections[active].append(line)
@@ -142,7 +144,13 @@ def is_placeholder(value: str) -> bool:
     normalized = strip_html_comments(value).strip()
     if not normalized:
         return True
-    return bool(PLACEHOLDER_RE.fullmatch(normalized))
+    meaningful: list[str] = []
+    for raw_line in normalized.splitlines():
+        line = re.sub(r"^[-*]\s*", "", raw_line.strip())
+        line = re.sub(r"^\[[ xX]\]\s*", "", line).strip()
+        if line:
+            meaningful.append(line)
+    return not meaningful or all(PLACEHOLDER_RE.fullmatch(line) for line in meaningful)
 
 
 def classify_path(path: str) -> str:
