@@ -200,7 +200,7 @@ def validate_workflow_text(text: str, *, default_branch: str = "main") -> None:
     test_steps = [
         step
         for step in gate_steps
-        if "pytest" in str(step.get("run", ""))
+        if "pytest -o addopts=" in str(step.get("run", ""))
     ]
     if len(test_steps) != 1:
         raise ContractError("Causal PR Gate must run one targeted pytest step")
