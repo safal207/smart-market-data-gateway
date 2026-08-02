@@ -90,6 +90,15 @@ def test_stable_check_name_change_is_rejected() -> None:
     assert_rejected(mutated, "workflow name")
 
 
+def test_conditional_gate_job_is_rejected() -> None:
+    mutated = workflow_text().replace(
+        "    runs-on: ubuntu-24.04\n",
+        "    if: ${{ false }}\n    runs-on: ubuntu-24.04\n",
+        1,
+    )
+    assert_rejected(mutated, "must not define an if condition")
+
+
 def test_removing_edited_event_is_rejected() -> None:
     mutated = workflow_text().replace("      - edited\n", "", 1)
     assert_rejected(mutated, "event types missing")
