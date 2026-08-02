@@ -24,6 +24,8 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+    env:
+      BOOTSTRAP_BASE_SHA: 59ff16e72fe856cf9b284427f357a5b4bc409ffb
     steps:
       - name: Checkout exact PR head
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -55,8 +57,11 @@ jobs:
           if git cat-file -e "${BASE_SHA}:scripts/ci/build_causal_pr_report.py" 2>/dev/null; then
             analyzer="${RUNNER_TEMP}/build_causal_pr_report.base.py"
             git show "${BASE_SHA}:scripts/ci/build_causal_pr_report.py" > "${analyzer}"
-          else
+          elif [[ "${BASE_SHA}" == "${BOOTSTRAP_BASE_SHA}" ]]; then
             echo "bootstrap_boundary=base_has_no_causal_analyzer" >&2
+          else
+            echo "base-bound causal analyzer is missing outside the authorized bootstrap boundary" >&2
+            exit 1
           fi
           python "${analyzer}" \
             --repository-path . \
@@ -78,8 +83,11 @@ jobs:
           if git cat-file -e "${BASE_SHA}:scripts/ci/check_causal_trust_root.py" 2>/dev/null; then
             checker="${RUNNER_TEMP}/check_causal_trust_root.base.py"
             git show "${BASE_SHA}:scripts/ci/check_causal_trust_root.py" > "${checker}"
-          else
+          elif [[ "${BASE_SHA}" == "${BOOTSTRAP_BASE_SHA}" ]]; then
             echo "bootstrap_boundary=base_has_no_trust_root_checker" >&2
+          else
+            echo "base-bound trust-root checker is missing outside the authorized bootstrap boundary" >&2
+            exit 1
           fi
           python "${checker}" \
             --repository-path . \
@@ -112,8 +120,11 @@ jobs:
           if git cat-file -e "${BASE_SHA}:scripts/ci/check_causal_workflow_contract.py" 2>/dev/null; then
             validator="${RUNNER_TEMP}/check_causal_workflow_contract.base.py"
             git show "${BASE_SHA}:scripts/ci/check_causal_workflow_contract.py" > "${validator}"
-          else
+          elif [[ "${BASE_SHA}" == "${BOOTSTRAP_BASE_SHA}" ]]; then
             echo "bootstrap_boundary=base_has_no_workflow_validator" >&2
+          else
+            echo "base-bound workflow validator is missing outside the authorized bootstrap boundary" >&2
+            exit 1
           fi
           python "${validator}" \
             .github/workflows/causal-pr-gate.yml \
