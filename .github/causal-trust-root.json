@@ -5,7 +5,7 @@
     ".github/workflows/ci.yml": "965f09adc57a150b4aa7ddea6896717dd71939bf",
     "scripts/ci/build_causal_pr_report.py": "33a96655ab28039308057eb99ceea344e52b3d39",
     "scripts/ci/check_causal_trust_root.py": "8f6888df10c49669e6eb4e9f14eb2561afdac5c1",
-    "scripts/ci/check_causal_workflow_contract.py": "0d374e783319fdf298706f5598badeae8ea84dd1",
+    "scripts/ci/check_causal_workflow_contract.py": "88c08da0d2c2ad0605186b2bf496fcaef9534bc7",
     "tests/test_causal_pr_contract.py": "c3e279d11b062c1f85b7ff79edde7ecfff2b80f0",
     "tests/test_causal_trust_root.py": "75bc3dc87aa1d1868d43d7f5f7340a2fabb86271",
     "tests/test_causal_workflow_contract.py": "ddc605db50c5d97f4e4ae56096ec6c9e0b874a07"
