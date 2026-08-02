@@ -134,6 +134,33 @@ def test_missing_causal_sections_block_pr(tmp_path: Path) -> None:
     assert any("Invariant after change" in error for error in report.errors)
 
 
+def test_empty_section_does_not_inherit_following_heading_content(tmp_path: Path) -> None:
+    repo, base = init_repo(tmp_path)
+    write(repo, "src/app.py", "def value() -> int:\n    return 2\n")
+    write(repo, "tests/test_app.py", "def test_value() -> None:\n    assert 2 == 2\n")
+    head = commit(repo)
+    body = """### Failure path
+A concrete failure path.
+
+### Invariant after change
+A concrete invariant.
+
+### Regression evidence
+Changed tests/test_app.py proves it.
+
+### Residual risk
+<!-- intentionally empty -->
+
+## Operational notes
+- [ ] This checklist must not fill Residual risk.
+"""
+
+    report, _ = run_report(tmp_path, repo, base, head, body)
+
+    assert not report.passed
+    assert any("Residual risk" in error for error in report.errors)
+
+
 def test_placeholders_block_pr(tmp_path: Path) -> None:
     repo, base = init_repo(tmp_path)
     write(repo, "src/app.py", "def value() -> int:\n    return 2\n")
