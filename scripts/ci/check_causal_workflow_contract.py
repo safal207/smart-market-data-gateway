@@ -167,6 +167,25 @@ def validate_workflow_text(text: str, *, default_branch: str = "main") -> None:
         if fragment not in analyzer_command:
             raise ContractError(f"analyzer command missing exact provenance argument: {fragment}")
 
+    trust_steps = [
+        step
+        for step in gate_steps
+        if "check_causal_trust_root.py" in str(step.get("run", ""))
+    ]
+    if len(trust_steps) != 1:
+        raise ContractError("workflow must run check_causal_trust_root.py exactly once")
+    trust_command = str(trust_steps[0].get("run", ""))
+    if 'git show "${BASE_SHA}:scripts/ci/check_causal_trust_root.py"' not in trust_command:
+        raise ContractError("trust-root validation must prefer the exact base-SHA checker")
+    for fragment in (
+        '--base-sha "${{ github.event.pull_request.base.sha }}"',
+        '--head-sha "${{ github.event.pull_request.head.sha }}"',
+        "--manifest-path .github/causal-trust-root.json",
+        "--output artifacts/causal/trust-root-verification.json",
+    ):
+        if fragment not in trust_command:
+            raise ContractError(f"trust-root command missing required argument: {fragment}")
+
     validator_steps = [
         step
         for step in gate_steps
@@ -177,6 +196,22 @@ def validate_workflow_text(text: str, *, default_branch: str = "main") -> None:
     validator_command = str(validator_steps[0].get("run", ""))
     if 'git show "${BASE_SHA}:scripts/ci/check_causal_workflow_contract.py"' not in validator_command:
         raise ContractError("workflow validation must prefer the exact base-SHA validator")
+
+    test_steps = [
+        step
+        for step in gate_steps
+        if "pytest" in str(step.get("run", ""))
+    ]
+    if len(test_steps) != 1:
+        raise ContractError("Causal PR Gate must run one targeted pytest step")
+    test_command = str(test_steps[0].get("run", ""))
+    for test_path in (
+        "tests/test_causal_pr_contract.py",
+        "tests/test_causal_trust_root.py",
+        "tests/test_causal_workflow_contract.py",
+    ):
+        if test_path not in test_command:
+            raise ContractError(f"targeted causal tests missing protected test path: {test_path}")
 
     upload_steps = [
         step
