@@ -23,6 +23,8 @@ The workflow runs only on `pull_request` events and never on `pull_request_targe
 
 The analyzer rejects a stale event, a different checkout SHA, a missing Git object, or a dirty worktree. Evidence names and report bodies include the exact head SHA, run ID, and run attempt.
 
+The classified diff compares the exact base tree directly with the exact head tree. It does not use the merge base, because changes present only on an advanced base are still part of the declared base-to-head tree transition.
+
 For established installations, the workflow loads the analyzer, workflow validator, trust-root checker, and manifest from the exact base SHA. A pull request therefore cannot weaken the validator and immediately use the weaker head version to approve the same transition.
 
 ## Exact-tree trust root
@@ -75,9 +77,9 @@ Workflow and CI-validator changes additionally require a changed causal, workflo
 
 ### LIGHTWEIGHT
 
-LIGHTWEIGHT mode applies only when every destination path is documentation. Exact SHA, clean-worktree, rename-aware diff, provenance, and evidence generation still run. The four causal sections are optional.
+LIGHTWEIGHT mode applies only when every affected path is documentation. Exact SHA, clean-worktree, exact-tree diff, provenance, and evidence generation still run. The four causal sections are optional.
 
-Renames are classified by destination path.
+Renames are classified by both source and destination. A move from executable code into documentation remains `STRICT`; only documentation-to-documentation renames can remain `LIGHTWEIGHT`.
 
 ## Causal graph
 
@@ -130,6 +132,8 @@ Mutation tests reject:
 - a changed stable check name;
 - removal of the `edited` event;
 - weakened permissions;
+- job-level or step-level conditions that can skip required gate work;
+- `continue-on-error` on workflow steps;
 - removal of the base-bound trust-root checker;
 - removal of the exact-tree regression test.
 
