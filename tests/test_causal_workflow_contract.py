@@ -102,7 +102,9 @@ def test_conditional_gate_job_is_rejected() -> None:
 def test_conditional_trust_root_step_is_rejected() -> None:
     mutated = workflow_text().replace(
         "      - name: Verify exact-tree trust root with base checker\n        shell: bash\n",
-        "      - name: Verify exact-tree trust root with base checker\n        if: ${{ false }}\n        shell: bash\n",
+        "      - name: Verify exact-tree trust root with base checker\n"
+        "        if: ${{ false }}\n"
+        "        shell: bash\n",
         1,
     )
     assert_rejected(mutated, "steps must not define if conditions")
@@ -111,7 +113,9 @@ def test_conditional_trust_root_step_is_rejected() -> None:
 def test_continue_on_error_on_trust_root_step_is_rejected() -> None:
     mutated = workflow_text().replace(
         "      - name: Verify exact-tree trust root with base checker\n        shell: bash\n",
-        "      - name: Verify exact-tree trust root with base checker\n        continue-on-error: true\n        shell: bash\n",
+        "      - name: Verify exact-tree trust root with base checker\n"
+        "        continue-on-error: true\n"
+        "        shell: bash\n",
         1,
     )
     assert_rejected(mutated, "must not define continue-on-error")
@@ -120,7 +124,9 @@ def test_continue_on_error_on_trust_root_step_is_rejected() -> None:
 def test_continue_on_error_on_artifact_upload_is_rejected() -> None:
     mutated = workflow_text().replace(
         "      - name: Upload exact-SHA causal evidence\n        if: ${{ always() }}\n",
-        "      - name: Upload exact-SHA causal evidence\n        continue-on-error: true\n        if: ${{ always() }}\n",
+        "      - name: Upload exact-SHA causal evidence\n"
+        "        continue-on-error: true\n"
+        "        if: ${{ always() }}\n",
         1,
     )
     assert_rejected(mutated, "must not define continue-on-error")
