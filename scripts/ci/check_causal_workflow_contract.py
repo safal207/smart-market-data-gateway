@@ -13,8 +13,10 @@ import yaml
 PINNED_ACTION_RE = re.compile(
     r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_./-]+)?@[0-9a-f]{40}$"
 )
+POSITIVE_TIMEOUT_RE = re.compile(r"^[1-9][0-9]*$")
 REQUIRED_EVENTS = {"opened", "synchronize", "reopened", "ready_for_review", "edited"}
 EXACT_CHECK_NAME = "Causal PR Gate"
+BOOTSTRAP_BASE_SHA = "59ff16e72fe856cf9b284427f357a5b4bc409ffb"
 
 
 class ContractError(RuntimeError):
@@ -22,6 +24,12 @@ class ContractError(RuntimeError):
 
 
 class UniqueKeyLoader(yaml.BaseLoader):
+    """Reject duplicate keys while preserving scalar strings such as the workflow `on` key.
+
+    BaseLoader constructs no arbitrary Python objects. Replacing it with the YAML 1.1
+    safe loader would coerce `on` to a boolean and silently break trigger validation.
+    """
+
     pass
 
 
@@ -57,8 +65,13 @@ def as_list(value: Any, label: str) -> list[Any]:
     return value
 
 
+def positive_timeout(value: Any) -> bool:
+    return bool(POSITIVE_TIMEOUT_RE.fullmatch(str(value)))
+
+
 def load_unique_yaml(text: str) -> dict[str, Any]:
     try:
+        # nosemgrep: python-yaml-unsafe-load - UniqueKeyLoader derives from BaseLoader.
         loaded = yaml.load(text, Loader=UniqueKeyLoader)
     except yaml.YAMLError as exc:
         raise ContractError(f"invalid YAML: {exc}") from exc
@@ -73,6 +86,16 @@ def all_steps(workflow: dict[str, Any]) -> list[dict[str, Any]]:
         for raw_step in as_list(job.get("steps", []), f"job {job_name} steps"):
             steps.append(as_mapping(raw_step, f"job {job_name} step"))
     return steps
+
+
+def require_bootstrap_guard(command: str, label: str) -> None:
+    required = (
+        'elif [[ "${BASE_SHA}" == "${BOOTSTRAP_BASE_SHA}" ]]; then',
+        "exit 1",
+    )
+    for fragment in required:
+        if fragment not in command:
+            raise ContractError(f"{label} must fail closed outside the exact bootstrap base")
 
 
 def validate_workflow_text(text: str, *, default_branch: str = "main") -> None:
@@ -114,11 +137,14 @@ def validate_workflow_text(text: str, *, default_branch: str = "main") -> None:
     gate = gate_jobs[0]
     if "if" in gate:
         raise ContractError("Causal PR Gate job must not define an if condition")
-    if not str(gate.get("timeout-minutes", "")).isdigit():
-        raise ContractError("Causal PR Gate job must have timeout-minutes")
+    if not positive_timeout(gate.get("timeout-minutes", "")):
+        raise ContractError("Causal PR Gate job must have a positive ASCII timeout-minutes")
     gate_permissions = as_mapping(gate.get("permissions"), "Causal PR Gate permissions")
     if gate_permissions != {"contents": "read"}:
         raise ContractError("Causal PR Gate permissions must be exactly contents: read")
+    gate_env = as_mapping(gate.get("env"), "Causal PR Gate env")
+    if gate_env.get("BOOTSTRAP_BASE_SHA") != BOOTSTRAP_BASE_SHA:
+        raise ContractError("Causal PR Gate must bind the one authorized bootstrap base SHA")
 
     steps = all_steps(workflow)
     for step in steps:
@@ -167,6 +193,7 @@ def validate_workflow_text(text: str, *, default_branch: str = "main") -> None:
     analyzer_command = str(analyzer_steps[0].get("run", ""))
     if 'git show "${BASE_SHA}:scripts/ci/build_causal_pr_report.py"' not in analyzer_command:
         raise ContractError("causal analysis must prefer the exact base-SHA analyzer")
+    require_bootstrap_guard(analyzer_command, "causal analyzer selection")
     required_fragments = (
         '--base-sha "${{ github.event.pull_request.base.sha }}"',
         '--head-sha "${{ github.event.pull_request.head.sha }}"',
@@ -188,6 +215,7 @@ def validate_workflow_text(text: str, *, default_branch: str = "main") -> None:
     trust_command = str(trust_steps[0].get("run", ""))
     if 'git show "${BASE_SHA}:scripts/ci/check_causal_trust_root.py"' not in trust_command:
         raise ContractError("trust-root validation must prefer the exact base-SHA checker")
+    require_bootstrap_guard(trust_command, "trust-root checker selection")
     for fragment in (
         '--base-sha "${{ github.event.pull_request.base.sha }}"',
         '--head-sha "${{ github.event.pull_request.head.sha }}"',
@@ -207,6 +235,7 @@ def validate_workflow_text(text: str, *, default_branch: str = "main") -> None:
     validator_command = str(validator_steps[0].get("run", ""))
     if 'git show "${BASE_SHA}:scripts/ci/check_causal_workflow_contract.py"' not in validator_command:
         raise ContractError("workflow validation must prefer the exact base-SHA validator")
+    require_bootstrap_guard(validator_command, "workflow validator selection")
 
     test_steps = [
         step
@@ -250,8 +279,8 @@ def validate_workflow_text(text: str, *, default_branch: str = "main") -> None:
 
     for job_name, raw_job in jobs.items():
         job = as_mapping(raw_job, f"job {job_name}")
-        if not str(job.get("timeout-minutes", "")).isdigit():
-            raise ContractError(f"job {job_name} must have timeout-minutes")
+        if not positive_timeout(job.get("timeout-minutes", "")):
+            raise ContractError(f"job {job_name} must have a positive ASCII timeout-minutes")
         if "permissions" not in job:
             raise ContractError(f"job {job_name} must define explicit permissions")
 
