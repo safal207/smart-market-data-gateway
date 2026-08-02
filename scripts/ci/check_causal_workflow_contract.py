@@ -98,11 +98,12 @@ def reject_shell_failure_masking(command: str, label: str) -> None:
         "legacy command substitution": "`",
         "errexit disable": "set +e",
         "errexit option disable": "set +o errexit",
-        "error trap": "trap ",
     }
     for description, marker in forbidden.items():
         if marker in normalized:
             raise ContractError(f"{label} contains shell-level failure masking: {description}")
+    if re.search(r"(?m)^\s*trap(?:\s|$)", normalized):
+        raise ContractError(f"{label} contains shell-level failure masking: error trap")
 
     lines = [line.strip() for line in normalized.splitlines() if line.strip()]
     if not lines or lines[0] != "set -euo pipefail":
