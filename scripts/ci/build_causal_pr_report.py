@@ -23,7 +23,8 @@ PLACEHOLDER_RE = re.compile(
     r"(?:[\s:;,.!\-]*)$",
     re.IGNORECASE,
 )
-MARKDOWN_HEADING_RE = re.compile(r"^\s*(#{1,6})\s+(.+?)\s*$")
+ATX_HEADING_RE = re.compile(r"^[ ]{0,3}(#{1,6})(?:[ \t]+(.*?))?[ \t]*$")
+FENCE_RE = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})(.*)$")
 URL_RE = re.compile(r"https?://[^\s)>\]}]+", re.IGNORECASE)
 SECRET_PATTERNS = (
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
@@ -49,6 +50,7 @@ class ChangedFile:
     path: str
     category: str
     old_path: str | None = None
+    old_category: str | None = None
 
 
 @dataclass(frozen=True)
@@ -125,18 +127,51 @@ def strip_html_comments(value: str) -> str:
     return re.sub(r"<!--.*?-->", "", value, flags=re.DOTALL).strip()
 
 
+def normalize_atx_title(value: str | None) -> str:
+    title = value or ""
+    return re.sub(r"[ \t]+#+[ \t]*$", "", title).strip()
+
+
 def parse_causal_sections(body: str) -> dict[str, str]:
     headings = {title.casefold(): title for title in SECTION_TITLES}
     sections: dict[str, list[str]] = {title: [] for title in SECTION_TITLES}
     active: str | None = None
+    fence_character: str | None = None
+    fence_length = 0
+
     for line in body.splitlines():
-        heading = MARKDOWN_HEADING_RE.match(line)
-        if heading:
-            level, title = heading.groups()
-            active = headings.get(title.strip().casefold()) if len(level) == 3 else None
+        fence = FENCE_RE.match(line)
+        if fence:
+            marker, suffix = fence.groups()
+            if fence_character is None:
+                fence_character = marker[0]
+                fence_length = len(marker)
+            elif (
+                marker[0] == fence_character
+                and len(marker) >= fence_length
+                and not suffix.strip()
+            ):
+                fence_character = None
+                fence_length = 0
+            if active is not None:
+                sections[active].append(line)
             continue
+
+        if fence_character is not None:
+            if active is not None:
+                sections[active].append(line)
+            continue
+
+        heading = ATX_HEADING_RE.match(line)
+        if heading:
+            level, raw_title = heading.groups()
+            title = normalize_atx_title(raw_title)
+            active = headings.get(title.casefold()) if len(level) == 3 else None
+            continue
+
         if active is not None:
             sections[active].append(line)
+
     return {title: strip_html_comments("\n".join(lines)) for title, lines in sections.items()}
 
 
@@ -190,8 +225,30 @@ def classify_path(path: str) -> str:
     return "other"
 
 
+def categories_for(item: ChangedFile) -> set[str]:
+    categories = {item.category}
+    if item.old_category is not None:
+        categories.add(item.old_category)
+    return categories
+
+
+def paths_for(item: ChangedFile) -> set[str]:
+    paths = {item.path}
+    if item.old_path is not None:
+        paths.add(item.old_path)
+    return paths
+
+
 def parse_diff(repo: Path, base_sha: str, head_sha: str) -> tuple[ChangedFile, ...]:
-    result = run_git(repo, "diff", "--name-status", "-M", f"{base_sha}...{head_sha}")
+    result = run_git(
+        repo,
+        "diff",
+        "--name-status",
+        "--find-renames",
+        base_sha,
+        head_sha,
+        "--",
+    )
     changed: list[ChangedFile] = []
     for raw in result.stdout.splitlines():
         if not raw.strip():
@@ -208,6 +265,7 @@ def parse_diff(repo: Path, base_sha: str, head_sha: str) -> tuple[ChangedFile, .
                     path=destination,
                     old_path=old_path,
                     category=classify_path(destination),
+                    old_category=classify_path(old_path),
                 )
             )
         else:
@@ -220,7 +278,7 @@ def parse_diff(repo: Path, base_sha: str, head_sha: str) -> tuple[ChangedFile, .
 
 def determine_mode(changed: Iterable[ChangedFile]) -> str:
     files = tuple(changed)
-    if files and all(item.category == "documentation" for item in files):
+    if files and all(categories_for(item) == {"documentation"} for item in files):
         return "LIGHTWEIGHT"
     return "STRICT"
 
@@ -290,9 +348,13 @@ def validate_contract(
         for item in changed
         if item.category == "tests" and not item.status.startswith("D")
     )
-    executable_change = any(item.category in {"implementation", "workflows", "other"} for item in changed)
+    executable_change = any(
+        categories_for(item) & {"implementation", "workflows", "other"}
+        for item in changed
+    )
     validator_or_workflow_change = any(
-        item.category == "workflows" or item.path in PROTECTED_VALIDATOR_PATHS
+        "workflows" in categories_for(item)
+        or bool(paths_for(item) & PROTECTED_VALIDATOR_PATHS)
         for item in changed
     )
 
@@ -330,6 +392,15 @@ def mermaid(report: Report, invariant: str, evidence: str) -> str:
     )
 
 
+def changed_file_markdown(item: ChangedFile) -> str:
+    if item.old_path is not None:
+        return (
+            f"- `{item.status}` `{sanitize(item.old_path)}` (**{item.old_category}**) "
+            f"→ `{sanitize(item.path)}` (**{item.category}**)"
+        )
+    return f"- `{item.status}` `{sanitize(item.path)}` → **{item.category}**"
+
+
 def write_reports(output_dir: Path, report: Report, sections: dict[str, str]) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     json_path = output_dir / "causal-pr-report.json"
@@ -340,9 +411,7 @@ def write_reports(output_dir: Path, report: Report, sections: dict[str, str]) ->
     )
     counts = ", ".join(f"{key}={value}" for key, value in sorted(report.category_counts.items()))
     errors = "\n".join(f"- {sanitize(error)}" for error in report.errors) or "- none"
-    changed = "\n".join(
-        f"- `{item.status}` `{sanitize(item.path)}` → **{item.category}**" for item in report.changed_files
-    ) or "- no changed files"
+    changed = "\n".join(changed_file_markdown(item) for item in report.changed_files) or "- no changed files"
     markdown = f"""# Causal PR Report
 
 - **Result:** {'PASS' if report.passed else 'FAIL'}
@@ -407,9 +476,10 @@ def build_report(args: argparse.Namespace) -> Report:
 
     counts = {category: 0 for category in ("implementation", "workflows", "tests", "documentation", "other")}
     for item in changed:
-        counts[item.category] += 1
+        for category in categories_for(item):
+            counts[category] += 1
     report = Report(
-        schema_version="1.0",
+        schema_version="1.1",
         repository=sanitize(args.repository),
         base_sha=args.base_sha,
         head_sha=args.head_sha,
