@@ -1,0 +1,11 @@
+# Trust-root and causal CI surfaces require repository-owner review.
+/.github/workflows/causal-pr-gate.yml @safal207
+/.github/workflows/ci.yml @safal207
+/scripts/ci/build_causal_pr_report.py @safal207
+/scripts/ci/check_causal_workflow_contract.py @safal207
+/tests/test_causal_pr_contract.py @safal207
+/tests/test_causal_workflow_contract.py @safal207
+/.github/CODEOWNERS @safal207
+/.github/pull_request_template.md @safal207
+/AGENTS.md @safal207
+/docs/ci/CAUSAL_PR_GATE.md @safal207
