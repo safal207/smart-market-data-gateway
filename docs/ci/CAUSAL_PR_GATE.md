@@ -23,7 +23,31 @@ The workflow runs only on `pull_request` events and never on `pull_request_targe
 
 The analyzer rejects a stale event, a different checkout SHA, a missing Git object, or a dirty worktree. Evidence names and report bodies include the exact head SHA, run ID, and run attempt.
 
-For established installations, the workflow prefers the analyzer and workflow validator stored at the exact base SHA. A pull request therefore cannot weaken the validator and immediately use the weaker head version to approve the same transition. During the first bootstrap, those base files do not yet exist, so the head implementation is used and the bootstrap boundary is logged explicitly.
+For established installations, the workflow loads the analyzer, workflow validator, trust-root checker, and manifest from the exact base SHA. A pull request therefore cannot weaken the validator and immediately use the weaker head version to approve the same transition.
+
+## Exact-tree trust root
+
+`.github/causal-trust-root.json` stores the exact Git blob IDs of the protected causal-CI tree:
+
+- the permanent workflow;
+- the causal report analyzer;
+- the workflow contract validator;
+- the trust-root checker;
+- causal contract tests;
+- workflow mutation tests;
+- exact-tree trust-root tests;
+- selected CI and ownership surfaces.
+
+The IDs are obtained from the actual Git tree, not calculated or copied by inspection.
+
+In established mode:
+
+1. the checker itself is loaded from the exact base SHA;
+2. the base manifest blob must remain unchanged in the head;
+3. every protected head file must have the blob ID declared by the base manifest;
+4. any mismatch fails closed and requires a separate trust-root bootstrap.
+
+This prevents an ordinary pull request from changing the workflow, validator, checker, manifest, and tests together to manufacture a false green result.
 
 ## Modes
 
@@ -76,6 +100,7 @@ The gate writes:
 ```text
 artifacts/causal/causal-pr-report.json
 artifacts/causal/causal-pr-report.md
+artifacts/causal/trust-root-verification.json
 ```
 
 Artifact identity includes:
@@ -90,7 +115,7 @@ Uploads use `if-no-files-found: error`. The report does not copy the full PR bod
 
 The causal job has only `contents: read`, receives no repository secrets, and checks out the fork's exact head repository and SHA with credentials disabled. Base objects are fetched without credentials from the public base repository.
 
-The CodeQL job has explicit `contents: read`, `packages: read`, and `security-events: write` permissions and is skipped for fork pull requests where security-event upload authority is unavailable. The causal check still runs for forks.
+The causal analyzer and exact-tree checker run before any project code is executed. Validation dependencies are installed separately. The CodeQL job has explicit `contents: read`, `packages: read`, and `security-events: write` permissions and is skipped for fork pull requests where security-event upload authority is unavailable. The causal check still runs for forks.
 
 ## Workflow self-protection
 
@@ -104,30 +129,32 @@ Mutation tests reject:
 - duplicate YAML keys;
 - a changed stable check name;
 - removal of the `edited` event;
-- weakened permissions.
+- weakened permissions;
+- removal of the base-bound trust-root checker;
+- removal of the exact-tree regression test.
 
 All external actions are pinned to full 40-character commit SHAs. Jobs have explicit timeouts and minimum permissions. Concurrency cancels stale runs for the same PR.
 
-`CODEOWNERS` marks the workflow, analyzers, tests, PR template, reviewer instructions, and this document as owner-reviewed trust surfaces. Repository branch settings must require code-owner or equivalent independent review for that protection to have enforcement authority.
+`CODEOWNERS` marks trust surfaces for owner review. Repository branch settings must require code-owner or equivalent independent review for that declaration to have enforcement authority.
 
 ## Failure recovery
 
 1. Do not weaken the check to make it green.
 2. Open the JSON and Markdown evidence artifacts from the exact failed run.
 3. Confirm the displayed base SHA and head SHA match the current PR event.
-4. Correct the PR body, tests, workflow, or implementation.
+4. Correct the PR body, tests, workflow, implementation, or manifest mismatch.
 5. Push a normal follow-up commit; do not force-push or rewrite history.
 6. Let `synchronize` or `edited` start a new run. Concurrency cancels stale attempts.
 
-A stale-head failure means the report was requested for a SHA different from the event payload. Re-run only after the PR head and event agree.
+A stale-head failure means the report was requested for a SHA different from the event payload. A trust-root mismatch means the proposed change is outside the authority of an ordinary feature PR.
 
 ## Bootstrap boundary
 
-The repository had no pre-existing protected-files manifest or causal trust-root validator before this change. This PR is therefore a bootstrap from the exact default-branch SHA recorded in the PR description.
+The repository had no pre-existing in-tree protected-files manifest before version 1. This bootstrap therefore reads the new checker and manifest from the exact head because the exact base SHA cannot contain them.
 
-A pre-existing trust-root gate, when present in another repository, may and should reject a PR that replaces its own root. That red result is an expected bootstrap boundary and must not be bypassed. This repository currently has no such manifest, so the corresponding exact-tree manifest test is not applicable for version 1.
+After bootstrap merge, future ordinary PRs use the exact base checker and base manifest. A later legitimate trust-root replacement must be a separate bootstrap. The old trust-root gate may and should reject that replacement because the current root cannot grant authority to its own successor. That single red trust-root result is an expected bootstrap boundary and must not be disabled or bypassed.
 
-The bootstrap must remain a separate Draft PR. It must not be mixed into a feature PR. Merge requires independent human/bot review of the exact head SHA. No bot review, artifact, approval comment, or green status grants merge authority.
+The bootstrap remains a separate Draft PR. It is not mixed into a feature PR. Merge requires independent human/bot review of the exact head SHA. No bot review, artifact, approval comment, or green status grants merge authority.
 
 ## Residual limits
 
@@ -137,5 +164,5 @@ The owner must complete the final enforcement step after merge:
 
 1. independently inspect and merge the bootstrap;
 2. add `Causal PR Gate` to required status checks on the default branch;
-3. require independent review for protected causal-CI paths;
+3. require independent/code-owner review for protected causal-CI paths;
 4. keep force-push disabled on the default branch.
