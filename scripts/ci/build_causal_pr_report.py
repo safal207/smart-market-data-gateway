@@ -148,13 +148,9 @@ def parse_causal_sections(body: str) -> dict[str, str]:
             ):
                 fence_character = None
                 fence_length = 0
-            if active is not None:
-                sections[active].append(line)
             continue
 
         if fence_character is not None:
-            if active is not None:
-                sections[active].append(line)
             continue
 
         heading = ATX_HEADING_RE.match(line)
@@ -170,16 +166,26 @@ def parse_causal_sections(body: str) -> dict[str, str]:
     return {title: strip_html_comments("\n".join(lines)) for title, lines in sections.items()}
 
 
+def normalize_markdown_item(raw_line: str) -> str:
+    line = raw_line.strip()
+    previous: str | None = None
+    while line != previous:
+        previous = line
+        line = re.sub(r"^(?:>\s*)+", "", line).strip()
+        line = re.sub(r"^(?:[-*+]\s+|\d+[.)]\s+)", "", line).strip()
+        line = re.sub(r"^\[[ xX]\]\s*", "", line).strip()
+    return line
+
+
 def is_placeholder(value: str) -> bool:
     normalized = strip_html_comments(value).strip()
     if not normalized:
         return True
-    meaningful: list[str] = []
-    for raw_line in normalized.splitlines():
-        line = re.sub(r"^[-*]\s*", "", raw_line.strip())
-        line = re.sub(r"^\[[ xX]\]\s*", "", line).strip()
-        if line:
-            meaningful.append(line)
+    meaningful = [
+        line
+        for raw_line in normalized.splitlines()
+        if (line := normalize_markdown_item(raw_line))
+    ]
     return not meaningful or all(PLACEHOLDER_RE.fullmatch(line) for line in meaningful)
 
 
@@ -240,6 +246,13 @@ def is_ci_validator_path(path: str) -> bool:
     )
 
 
+def is_runnable_test_path(path: str) -> bool:
+    name = Path(path).name.lower()
+    return path.lower().endswith(".py") and (
+        name.startswith("test_") or name.endswith("_test.py")
+    )
+
+
 def parse_diff(repo: Path, base_sha: str, head_sha: str) -> tuple[ChangedFile, ...]:
     result = run_git(
         repo,
@@ -288,7 +301,7 @@ def referenced_test_paths(repo: Path, regression_text: str) -> tuple[str, ...]:
     paths: list[str] = []
     for match in TEST_PATH_RE.finditer(regression_text):
         candidate = match.group(1)
-        if candidate in paths:
+        if candidate in paths or not is_runnable_test_path(candidate):
             continue
         resolved = (repo / candidate).resolve()
         try:
@@ -349,7 +362,9 @@ def validate_contract(
     changed_test_paths = tuple(
         item.path
         for item in changed
-        if item.category == "tests" and not item.status.startswith("D")
+        if item.category == "tests"
+        and not item.status.startswith("D")
+        and is_runnable_test_path(item.path)
     )
     executable_change = any(
         categories_for(item) & {"implementation", "workflows", "other"}
@@ -363,7 +378,7 @@ def validate_contract(
 
     if mode == "STRICT" and executable_change and not changed_test_paths and not existing_paths:
         errors.append(
-            "executable change requires a changed test or an exact existing repository test path in Regression evidence"
+            "executable change requires a changed runnable test or an exact existing runnable test path in Regression evidence"
         )
     if validator_or_workflow_change:
         mutation_candidates = tuple(
@@ -375,7 +390,7 @@ def validate_contract(
             or "trust_root" in path.lower()
         )
         if not mutation_candidates:
-            errors.append("workflow or CI-validator change requires a changed workflow mutation/regression test")
+            errors.append("workflow or CI-validator change requires a changed runnable workflow mutation/regression test")
     return errors, tuple(dict.fromkeys((*changed_test_paths, *existing_paths)))
 
 
@@ -490,7 +505,7 @@ def build_report(args: argparse.Namespace) -> Report:
         for category in categories_for(item):
             counts[category] += 1
     report = Report(
-        schema_version="1.2",
+        schema_version="1.3",
         repository=sanitize(args.repository),
         base_sha=args.base_sha,
         head_sha=args.head_sha,
