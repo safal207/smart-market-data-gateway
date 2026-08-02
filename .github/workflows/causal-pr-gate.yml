@@ -94,11 +94,13 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install validation dependencies
+      - name: Install isolated validation dependencies
         shell: bash
         run: |
           set -euo pipefail
-          python -m pip install --disable-pip-version-check -e ".[dev]"
+          python -m pip install --disable-pip-version-check \
+            "pytest==9.1.1" \
+            "PyYAML==6.0.3"
 
       - name: Validate workflow self-protection contract with base validator
         shell: bash
