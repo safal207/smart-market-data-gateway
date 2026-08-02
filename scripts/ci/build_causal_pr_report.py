@@ -35,13 +35,8 @@ SECRET_PATTERNS = (
         r"(?i)\b(?:api[_-]?key|token|secret|password|passwd|authorization)\b\s*[:=]\s*[^\s,;]+"
     ),
 )
-TEST_PATH_RE = re.compile(r"(?<![A-Za-z0-9_.-])((?:tests?|test)/[A-Za-z0-9_./-]+\.py)\b")
-PROTECTED_VALIDATOR_PATHS = {
-    ".github/causal-trust-root.json",
-    "scripts/ci/build_causal_pr_report.py",
-    "scripts/ci/check_causal_trust_root.py",
-    "scripts/ci/check_causal_workflow_contract.py",
-}
+TEST_PATH_RE = re.compile(r"(?<![A-Za-z0-9_./-])((?:tests?|test)/[A-Za-z0-9_./-]+\.py)\b")
+TRUST_ROOT_MANIFEST_PATH = ".github/causal-trust-root.json"
 
 
 @dataclass(frozen=True)
@@ -239,6 +234,12 @@ def paths_for(item: ChangedFile) -> set[str]:
     return paths
 
 
+def is_ci_validator_path(path: str) -> bool:
+    return path == TRUST_ROOT_MANIFEST_PATH or (
+        path.startswith("scripts/ci/") and path.endswith(".py")
+    )
+
+
 def parse_diff(repo: Path, base_sha: str, head_sha: str) -> tuple[ChangedFile, ...]:
     result = run_git(
         repo,
@@ -305,7 +306,7 @@ def validate_repository_state(
     head_sha: str,
     event_base_sha: str,
     event_head_sha: str,
-) -> tuple[bool, bool]:
+) -> tuple[bool, bool, tuple[str, ...]]:
     validate_sha("base SHA", base_sha)
     validate_sha("head SHA", head_sha)
     validate_sha("event base SHA", event_base_sha)
@@ -319,13 +320,15 @@ def validate_repository_state(
     run_git(repo, "cat-file", "-e", f"{head_sha}^{{commit}}")
     checkout = run_git(repo, "rev-parse", "HEAD").stdout.strip()
     checkout_matches = checkout == head_sha
-    if not checkout_matches:
-        raise GateFailure(f"checkout mismatch: HEAD is {checkout}, expected exact head SHA {head_sha}")
     dirty = run_git(repo, "status", "--porcelain=v1", "--untracked-files=all").stdout.strip()
     clean = not dirty
+
+    errors: list[str] = []
+    if not checkout_matches:
+        errors.append(f"checkout mismatch: HEAD is {checkout}, expected exact head SHA {head_sha}")
     if not clean:
-        raise GateFailure("worktree is dirty before causal analysis")
-    return clean, checkout_matches
+        errors.append("worktree is dirty before causal analysis")
+    return clean, checkout_matches, tuple(errors)
 
 
 def validate_contract(
@@ -354,7 +357,7 @@ def validate_contract(
     )
     validator_or_workflow_change = any(
         "workflows" in categories_for(item)
-        or bool(paths_for(item) & PROTECTED_VALIDATOR_PATHS)
+        or any(is_ci_validator_path(path) for path in paths_for(item))
         for item in changed
     )
 
@@ -376,9 +379,15 @@ def validate_contract(
     return errors, tuple(dict.fromkeys((*changed_test_paths, *existing_paths)))
 
 
+def mermaid_label(value: str, fallback: str) -> str:
+    normalized = sanitize(" ".join(value.split()))
+    normalized = normalized.replace("\\", "/").replace("`", "'").replace('"', "'")
+    return normalized[:160] or fallback
+
+
 def mermaid(report: Report, invariant: str, evidence: str) -> str:
-    invariant_label = sanitize(" ".join(invariant.split()))[:160] or "not required in lightweight mode"
-    evidence_label = sanitize(" ".join(evidence.split()))[:160] or "documentation-only evidence"
+    invariant_label = mermaid_label(invariant, "not required in lightweight mode")
+    evidence_label = mermaid_label(evidence, "documentation-only evidence")
     return "\n".join(
         (
             "```mermaid",
@@ -451,6 +460,7 @@ def build_report(args: argparse.Namespace) -> Report:
     event_head = ""
     worktree_clean = False
     checkout_matches = False
+    regression_paths: tuple[str, ...] = ()
 
     try:
         payload = parse_event(Path(args.event_path))
@@ -463,15 +473,16 @@ def build_report(args: argparse.Namespace) -> Report:
         if not isinstance(body, str):
             raise GateFailure("pull_request.body must be a string or null")
         sections = parse_causal_sections(body)
-        worktree_clean, checkout_matches = validate_repository_state(
+        worktree_clean, checkout_matches, state_errors = validate_repository_state(
             repo, args.base_sha, args.head_sha, event_base, event_head
         )
-        changed = parse_diff(repo, args.base_sha, args.head_sha)
-        mode = determine_mode(changed)
-        contract_errors, regression_paths = validate_contract(repo, changed, mode, sections)
-        errors.extend(contract_errors)
+        errors.extend(state_errors)
+        if not state_errors:
+            changed = parse_diff(repo, args.base_sha, args.head_sha)
+            mode = determine_mode(changed)
+            contract_errors, regression_paths = validate_contract(repo, changed, mode, sections)
+            errors.extend(contract_errors)
     except GateFailure as exc:
-        regression_paths = ()
         errors.append(str(exc))
 
     counts = {category: 0 for category in ("implementation", "workflows", "tests", "documentation", "other")}
@@ -479,7 +490,7 @@ def build_report(args: argparse.Namespace) -> Report:
         for category in categories_for(item):
             counts[category] += 1
     report = Report(
-        schema_version="1.1",
+        schema_version="1.2",
         repository=sanitize(args.repository),
         base_sha=args.base_sha,
         head_sha=args.head_sha,
