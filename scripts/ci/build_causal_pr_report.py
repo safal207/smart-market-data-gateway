@@ -34,6 +34,12 @@ SECRET_PATTERNS = (
     ),
 )
 TEST_PATH_RE = re.compile(r"(?<![A-Za-z0-9_.-])((?:tests?|test)/[A-Za-z0-9_./-]+\.py)\b")
+PROTECTED_VALIDATOR_PATHS = {
+    ".github/causal-trust-root.json",
+    "scripts/ci/build_causal_pr_report.py",
+    "scripts/ci/check_causal_trust_root.py",
+    "scripts/ci/check_causal_workflow_contract.py",
+}
 
 
 @dataclass(frozen=True)
@@ -271,19 +277,29 @@ def validate_contract(
 
     regression_text = sections.get("Regression evidence", "")
     existing_paths = referenced_test_paths(repo, regression_text)
-    changed_test_paths = tuple(item.path for item in changed if item.category == "tests")
+    changed_test_paths = tuple(
+        item.path
+        for item in changed
+        if item.category == "tests" and not item.status.startswith("D")
+    )
     executable_change = any(item.category in {"implementation", "workflows", "other"} for item in changed)
-    workflow_change = any(item.category == "workflows" for item in changed)
+    validator_or_workflow_change = any(
+        item.category == "workflows" or item.path in PROTECTED_VALIDATOR_PATHS
+        for item in changed
+    )
 
     if mode == "STRICT" and executable_change and not changed_test_paths and not existing_paths:
         errors.append(
             "executable change requires a changed test or an exact existing repository test path in Regression evidence"
         )
-    if workflow_change:
+    if validator_or_workflow_change:
         mutation_candidates = tuple(
             path
             for path in changed_test_paths
-            if "workflow" in path.lower() or "causal" in path.lower() or "contract" in path.lower()
+            if "workflow" in path.lower()
+            or "causal" in path.lower()
+            or "contract" in path.lower()
+            or "trust_root" in path.lower()
         )
         if not mutation_candidates:
             errors.append("workflow or CI-validator change requires a changed workflow mutation/regression test")
