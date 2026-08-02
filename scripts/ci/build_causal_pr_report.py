@@ -4,12 +4,12 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
 import re
 import subprocess
-from typing import Iterable
 
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 SECTION_TITLES = (
