@@ -3,10 +3,10 @@
     ".github/CODEOWNERS": "9a0507e3a9021a33e3eb37abb4d732029b8e9c77",
     ".github/workflows/causal-pr-gate.yml": "a961494050b9cf4dc9010f0ccf32ee78cc2278eb",
     ".github/workflows/ci.yml": "965f09adc57a150b4aa7ddea6896717dd71939bf",
-    "scripts/ci/build_causal_pr_report.py": "a655aef76d42268578cb9a98aeea4647a9921d5c",
+    "scripts/ci/build_causal_pr_report.py": "b38b2223790130d7e76198a62bf2009b62e03d3b",
     "scripts/ci/check_causal_trust_root.py": "8f6888df10c49669e6eb4e9f14eb2561afdac5c1",
     "scripts/ci/check_causal_workflow_contract.py": "04fa39dd8c24213e35c19b8bc8a46755af3b6d4f",
-    "tests/test_causal_pr_contract.py": "f63fad61b851a178fadb15abed48e79a7b45192a",
+    "tests/test_causal_pr_contract.py": "84faabb468076aa032b23a62d1ebca87418139bd",
     "tests/test_causal_trust_root.py": "75bc3dc87aa1d1868d43d7f5f7340a2fabb86271",
     "tests/test_causal_workflow_contract.py": "82248a567e1bfe72aef852dda5615d2cd2b15573"
   },
