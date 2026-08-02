@@ -88,6 +88,31 @@ def all_steps(workflow: dict[str, Any]) -> list[dict[str, Any]]:
     return steps
 
 
+def reject_shell_failure_masking(command: str, label: str) -> None:
+    normalized = command.replace("\r\n", "\n")
+    forbidden = {
+        "logical OR": "||",
+        "logical AND": "&&",
+        "pipeline": "|",
+        "command substitution": "$(",
+        "legacy command substitution": "`",
+        "errexit disable": "set +e",
+        "errexit option disable": "set +o errexit",
+        "error trap": "trap ",
+    }
+    for description, marker in forbidden.items():
+        if marker in normalized:
+            raise ContractError(f"{label} contains shell-level failure masking: {description}")
+
+    lines = [line.strip() for line in normalized.splitlines() if line.strip()]
+    if not lines or lines[0] != "set -euo pipefail":
+        raise ContractError(f"{label} must begin with set -euo pipefail")
+    if lines[-1] != "fi":
+        raise ContractError(f"{label} must end at the fail-closed conditional")
+    if any(line in {"true", ":"} for line in lines):
+        raise ContractError(f"{label} contains shell-level failure masking: unconditional success")
+
+
 def require_base_bound_execution(
     command: str,
     *,
@@ -95,12 +120,15 @@ def require_base_bound_execution(
     source_path: str,
     extracted_name: str,
 ) -> None:
-    extraction = f'git show "${{BASE_SHA}}:{source_path}"'
-    destination = f'> "${{RUNNER_TEMP}}/{extracted_name}"'
-    base_execution = f'python "${{RUNNER_TEMP}}/{extracted_name}"'
-    bootstrap_guard = 'elif [[ "${BASE_SHA}" == "${BOOTSTRAP_BASE_SHA}" ]]; then'
-    bootstrap_execution = f"python {source_path}"
+    reject_shell_failure_masking(command, label)
 
+    extraction = f'git show "${{BASE_SHA}}:{source_path}" \\'
+    destination = f'> "${{RUNNER_TEMP}}/{extracted_name}"'
+    base_execution = f'python "${{RUNNER_TEMP}}/{extracted_name}" \\'
+    bootstrap_guard = 'elif [[ "${BASE_SHA}" == "${BOOTSTRAP_BASE_SHA}" ]]; then'
+    bootstrap_execution = f"python {source_path} \\"
+
+    lines = [line.strip() for line in command.splitlines() if line.strip()]
     required_once = {
         "base extraction": extraction,
         "fixed extraction destination": destination,
@@ -108,16 +136,20 @@ def require_base_bound_execution(
         "exact bootstrap guard": bootstrap_guard,
         "bootstrap head-side execution": bootstrap_execution,
     }
-    for description, fragment in required_once.items():
-        if command.count(fragment) != 1:
+    for description, line in required_once.items():
+        if lines.count(line) != 1:
             raise ContractError(f"{label} must contain exactly one {description}")
 
-    extraction_index = command.index(extraction)
-    destination_index = command.index(destination)
-    base_execution_index = command.index(base_execution)
-    guard_index = command.index(bootstrap_guard)
-    bootstrap_execution_index = command.index(bootstrap_execution)
+    extraction_index = lines.index(extraction)
+    destination_index = lines.index(destination)
+    base_execution_index = lines.index(base_execution)
+    guard_index = lines.index(bootstrap_guard)
+    bootstrap_execution_index = lines.index(bootstrap_execution)
 
+    if destination_index != extraction_index + 1 or base_execution_index != destination_index + 1:
+        raise ContractError(
+            f"{label} must immediately execute the tool written to the fixed extraction destination"
+        )
     if not (
         extraction_index
         < destination_index
@@ -128,9 +160,13 @@ def require_base_bound_execution(
         raise ContractError(
             f"{label} must execute the extracted exact base-SHA tool before the bootstrap branch"
         )
-    if bootstrap_execution in command[:guard_index]:
+
+    established_lines = lines[base_execution_index:guard_index]
+    if any(";" in line or line.startswith("!") or line.endswith("&") for line in established_lines):
+        raise ContractError(f"{label} contains shell-level failure masking in the established branch")
+    if bootstrap_execution in lines[:guard_index]:
         raise ContractError(f"{label} must not execute the head-side tool in the established branch")
-    if "exit 1" not in command[bootstrap_execution_index:]:
+    if "exit 1" not in lines[bootstrap_execution_index:]:
         raise ContractError(f"{label} must fail closed outside the exact bootstrap base")
 
 
