@@ -1,7 +1,7 @@
 {
   "protected_files": {
     ".github/CODEOWNERS": "9a0507e3a9021a33e3eb37abb4d732029b8e9c77",
-    ".github/workflows/causal-pr-gate.yml": "fd42f0aeda0e7b0a6405fad8608fa2489cd15e7f",
+    ".github/workflows/causal-pr-gate.yml": "92fc349ac400988c9efb283ea333b06b85ab7997",
     ".github/workflows/ci.yml": "965f09adc57a150b4aa7ddea6896717dd71939bf",
     "scripts/ci/build_causal_pr_report.py": "33a96655ab28039308057eb99ceea344e52b3d39",
     "scripts/ci/check_causal_trust_root.py": "8f6888df10c49669e6eb4e9f14eb2561afdac5c1",
