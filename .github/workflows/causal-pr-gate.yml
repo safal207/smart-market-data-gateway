@@ -123,7 +123,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          pytest -o addopts="" \
+          pytest -o addopts="" --noconftest \
             tests/test_causal_pr_contract.py \
             tests/test_causal_trust_root.py \
             tests/test_causal_workflow_contract.py
