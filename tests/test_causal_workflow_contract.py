@@ -102,3 +102,21 @@ def test_weakened_permissions_are_rejected() -> None:
         1,
     )
     assert_rejected(mutated, "permissions must be exactly")
+
+
+def test_removing_base_bound_trust_checker_is_rejected() -> None:
+    mutated = workflow_text().replace(
+        'git show "${BASE_SHA}:scripts/ci/check_causal_trust_root.py"',
+        'echo "trust checker bypassed"',
+        1,
+    )
+    assert_rejected(mutated, "trust-root validation must prefer")
+
+
+def test_removing_exact_tree_test_is_rejected() -> None:
+    mutated = workflow_text().replace(
+        "            tests/test_causal_trust_root.py \\\n",
+        "",
+        1,
+    )
+    assert_rejected(mutated, "targeted causal tests missing")
