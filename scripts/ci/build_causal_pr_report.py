@@ -378,7 +378,8 @@ def validate_contract(
 
     if mode == "STRICT" and executable_change and not changed_test_paths and not existing_paths:
         errors.append(
-            "executable change requires a changed runnable test or an exact existing runnable test path in Regression evidence"
+            "executable change requires a changed runnable test or an exact existing "
+            "runnable test path in Regression evidence"
         )
     if validator_or_workflow_change:
         mutation_candidates = tuple(
@@ -390,7 +391,10 @@ def validate_contract(
             or "trust_root" in path.lower()
         )
         if not mutation_candidates:
-            errors.append("workflow or CI-validator change requires a changed runnable workflow mutation/regression test")
+            errors.append(
+                "workflow or CI-validator change requires a changed runnable "
+                "workflow mutation/regression test"
+            )
     return errors, tuple(dict.fromkeys((*changed_test_paths, *existing_paths)))
 
 
