@@ -121,6 +121,10 @@ def validate_workflow_text(text: str, *, default_branch: str = "main") -> None:
         raise ContractError("Causal PR Gate permissions must be exactly contents: read")
 
     steps = all_steps(workflow)
+    for step in steps:
+        if "continue-on-error" in step:
+            raise ContractError("workflow steps must not define continue-on-error")
+
     uses_steps = [step for step in steps if "uses" in step]
     for step in uses_steps:
         uses = str(step["uses"])
@@ -131,6 +135,11 @@ def validate_workflow_text(text: str, *, default_branch: str = "main") -> None:
         as_mapping(step, "gate step")
         for step in as_list(gate.get("steps"), "gate steps")
     ]
+    for step in gate_steps:
+        is_upload = str(step.get("uses", "")).startswith("actions/upload-artifact@")
+        if not is_upload and "if" in step:
+            raise ContractError("Causal PR Gate steps must not define if conditions")
+
     checkout_steps = [
         step
         for step in gate_steps
