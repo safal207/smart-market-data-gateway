@@ -210,6 +210,38 @@ Still only code.
     assert all(not present for present in report.causal_sections_present.values())
 
 
+def test_fenced_placeholder_content_inside_sections_does_not_count(tmp_path: Path) -> None:
+    repo, base = init_repo(tmp_path)
+    write(repo, "src/app.py", "def value() -> int:\n    return 2\n")
+    write(repo, "tests/test_app.py", "def test_value() -> None:\n    assert 2 == 2\n")
+    head = commit(repo)
+    body = """### Failure path
+```text
+TODO
+```
+
+### Invariant after change
+```text
+TODO
+```
+
+### Regression evidence
+```text
+tests/test_app.py
+```
+
+### Residual risk
+```text
+TODO
+```
+"""
+
+    report, _ = run_report(tmp_path, repo, base, head, body)
+
+    assert not report.passed
+    assert all(not present for present in report.causal_sections_present.values())
+
+
 def test_indented_code_headings_do_not_satisfy_sections(tmp_path: Path) -> None:
     repo, base = init_repo(tmp_path)
     write(repo, "src/app.py", "def value() -> int:\n    return 2\n")
@@ -254,6 +286,38 @@ def test_multiline_placeholder_only_section_blocks_pr(tmp_path: Path) -> None:
     body = full_body().replace(
         "A stale or unsafe transition could pass without causal evidence.",
         "TODO\nTBD",
+    )
+
+    report, _ = run_report(tmp_path, repo, base, head, body)
+
+    assert not report.passed
+    assert any("Failure path" in error for error in report.errors)
+
+
+def test_ordered_list_placeholder_only_section_blocks_pr(tmp_path: Path) -> None:
+    repo, base = init_repo(tmp_path)
+    write(repo, "src/app.py", "def value() -> int:\n    return 2\n")
+    write(repo, "tests/test_app.py", "def test_value() -> None:\n    assert 2 == 2\n")
+    head = commit(repo)
+    body = full_body().replace(
+        "A stale or unsafe transition could pass without causal evidence.",
+        "1. TODO",
+    )
+
+    report, _ = run_report(tmp_path, repo, base, head, body)
+
+    assert not report.passed
+    assert any("Failure path" in error for error in report.errors)
+
+
+def test_blockquote_placeholder_only_section_blocks_pr(tmp_path: Path) -> None:
+    repo, base = init_repo(tmp_path)
+    write(repo, "src/app.py", "def value() -> int:\n    return 2\n")
+    write(repo, "tests/test_app.py", "def test_value() -> None:\n    assert 2 == 2\n")
+    head = commit(repo)
+    body = full_body().replace(
+        "A stale or unsafe transition could pass without causal evidence.",
+        "> TODO",
     )
 
     report, _ = run_report(tmp_path, repo, base, head, body)
@@ -312,6 +376,28 @@ def test_longer_fake_path_does_not_match_existing_test_suffix(tmp_path: Path) ->
     assert any("executable change requires" in error for error in report.errors)
 
 
+def test_non_runnable_existing_test_path_is_rejected(tmp_path: Path) -> None:
+    repo, base = init_repo(tmp_path)
+    write(repo, "tests/helper.py", "VALUE = 1\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-m", "add helper")
+    base = git(repo, "rev-parse", "HEAD")
+    write(repo, "src/app.py", "def value() -> int:\n    return 2\n")
+    head = commit(repo)
+
+    report, _ = run_report(
+        tmp_path,
+        repo,
+        base,
+        head,
+        full_body("Existing tests/helper.py proves the invariant."),
+    )
+
+    assert not report.passed
+    assert report.regression_test_paths == ()
+    assert any("executable change requires" in error for error in report.errors)
+
+
 def test_executable_change_without_regression_evidence_blocks(tmp_path: Path) -> None:
     repo, base = init_repo(tmp_path)
     write(repo, "src/app.py", "def value() -> int:\n    return 2\n")
@@ -362,6 +448,19 @@ def test_workflow_change_without_contract_test_blocks(tmp_path: Path) -> None:
 
     assert not report.passed
     assert any("workflow mutation/regression test" in error for error in report.errors)
+
+
+def test_workflow_change_with_non_runnable_causal_note_blocks(tmp_path: Path) -> None:
+    repo, base = init_repo(tmp_path)
+    write(repo, ".github/workflows/ci.yml", "name: CI\n")
+    write(repo, "tests/causal_notes.txt", "not executable by pytest\n")
+    head = commit(repo)
+
+    report, _ = run_report(tmp_path, repo, base, head, full_body("Changed causal notes."))
+
+    assert not report.passed
+    assert "tests/causal_notes.txt" not in report.regression_test_paths
+    assert any("runnable workflow mutation/regression test" in error for error in report.errors)
 
 
 def test_validator_change_without_changed_mutation_test_blocks(tmp_path: Path) -> None:
