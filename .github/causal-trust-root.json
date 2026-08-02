@@ -1,14 +1,18 @@
 {
   "protected_files": {
-    ".github/CODEOWNERS": "9a0507e3a9021a33e3eb37abb4d732029b8e9c77",
-    ".github/workflows/causal-pr-gate.yml": "a961494050b9cf4dc9010f0ccf32ee78cc2278eb",
+    ".github/CODEOWNERS": "a25d3fa73560e293cff2578c3be63ab00e1e086f",
+    ".github/pull_request_template.md": "3d3a0bda57441e584b905f51a2644f4a96456e35",
+    ".github/workflows/causal-pr-gate.yml": "190bca3028b5a6bfb0936a2a76d0ea25b9eda033",
     ".github/workflows/ci.yml": "965f09adc57a150b4aa7ddea6896717dd71939bf",
-    "scripts/ci/build_causal_pr_report.py": "55797a78ab123f0b70949f096c0f3fa4171d396b",
-    "scripts/ci/check_causal_trust_root.py": "8f6888df10c49669e6eb4e9f14eb2561afdac5c1",
-    "scripts/ci/check_causal_workflow_contract.py": "dca6d32582db13e470c2bc69c9f411271a57274e",
-    "tests/test_causal_pr_contract.py": "f361b9cf9f65b1867aa95e42dace5a1755fc9731",
-    "tests/test_causal_trust_root.py": "75bc3dc87aa1d1868d43d7f5f7340a2fabb86271",
-    "tests/test_causal_workflow_contract.py": "db6f50de27e18fb7babd9f78f032d495a10836e0"
+    "AGENTS.md": "15ae19fe8e32b602151f88042559ff4567669c2b",
+    "docs/ci/CAUSAL_PR_GATE.md": "3117a52634a35f43d1ccaf5b63a26ee6f5736c30",
+    "pyproject.toml": "8770f5929f4957559213400a630ff2377da1af87",
+    "scripts/ci/build_causal_pr_report.py": "8d9c6d367f624c6871565bcb3f87e4a564970c5e",
+    "scripts/ci/check_causal_trust_root.py": "9dea68e82bcd3ec34e69339925074b3c2497dc0a",
+    "scripts/ci/check_causal_workflow_contract.py": "f3c6f3d8d46a535fae3e98f4e5e9b02bb0f6cce6",
+    "tests/test_causal_pr_contract.py": "0619475727e6c8e9b50f107c683dde7f0777a730",
+    "tests/test_causal_trust_root.py": "dd230e11787b0aec49c61953f76fa30ca8e921ff",
+    "tests/test_causal_workflow_contract.py": "4720958035aa5cf839eda1cd3beeb0794a188918"
   },
   "schema_version": 1
 }
