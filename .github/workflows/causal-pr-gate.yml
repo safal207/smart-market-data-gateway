@@ -53,25 +53,33 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          analyzer="scripts/ci/build_causal_pr_report.py"
           if git cat-file -e "${BASE_SHA}:scripts/ci/build_causal_pr_report.py" 2>/dev/null; then
-            analyzer="${RUNNER_TEMP}/build_causal_pr_report.base.py"
-            git show "${BASE_SHA}:scripts/ci/build_causal_pr_report.py" > "${analyzer}"
+            git show "${BASE_SHA}:scripts/ci/build_causal_pr_report.py" \
+              > "${RUNNER_TEMP}/build_causal_pr_report.base.py"
+            python "${RUNNER_TEMP}/build_causal_pr_report.base.py" \
+              --repository-path . \
+              --repository "${{ github.repository }}" \
+              --base-sha "${{ github.event.pull_request.base.sha }}" \
+              --head-sha "${{ github.event.pull_request.head.sha }}" \
+              --event-path "${{ github.event_path }}" \
+              --run-id "${{ github.run_id }}" \
+              --run-attempt "${{ github.run_attempt }}" \
+              --output-dir artifacts/causal
           elif [[ "${BASE_SHA}" == "${BOOTSTRAP_BASE_SHA}" ]]; then
             echo "bootstrap_boundary=base_has_no_causal_analyzer" >&2
+            python scripts/ci/build_causal_pr_report.py \
+              --repository-path . \
+              --repository "${{ github.repository }}" \
+              --base-sha "${{ github.event.pull_request.base.sha }}" \
+              --head-sha "${{ github.event.pull_request.head.sha }}" \
+              --event-path "${{ github.event_path }}" \
+              --run-id "${{ github.run_id }}" \
+              --run-attempt "${{ github.run_attempt }}" \
+              --output-dir artifacts/causal
           else
             echo "base-bound causal analyzer is missing outside the authorized bootstrap boundary" >&2
             exit 1
           fi
-          python "${analyzer}" \
-            --repository-path . \
-            --repository "${{ github.repository }}" \
-            --base-sha "${{ github.event.pull_request.base.sha }}" \
-            --head-sha "${{ github.event.pull_request.head.sha }}" \
-            --event-path "${{ github.event_path }}" \
-            --run-id "${{ github.run_id }}" \
-            --run-attempt "${{ github.run_attempt }}" \
-            --output-dir artifacts/causal
 
       - name: Verify exact-tree trust root with base checker
         shell: bash
@@ -79,22 +87,27 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          checker="scripts/ci/check_causal_trust_root.py"
           if git cat-file -e "${BASE_SHA}:scripts/ci/check_causal_trust_root.py" 2>/dev/null; then
-            checker="${RUNNER_TEMP}/check_causal_trust_root.base.py"
-            git show "${BASE_SHA}:scripts/ci/check_causal_trust_root.py" > "${checker}"
+            git show "${BASE_SHA}:scripts/ci/check_causal_trust_root.py" \
+              > "${RUNNER_TEMP}/check_causal_trust_root.base.py"
+            python "${RUNNER_TEMP}/check_causal_trust_root.base.py" \
+              --repository-path . \
+              --base-sha "${{ github.event.pull_request.base.sha }}" \
+              --head-sha "${{ github.event.pull_request.head.sha }}" \
+              --manifest-path .github/causal-trust-root.json \
+              --output artifacts/causal/trust-root-verification.json
           elif [[ "${BASE_SHA}" == "${BOOTSTRAP_BASE_SHA}" ]]; then
             echo "bootstrap_boundary=base_has_no_trust_root_checker" >&2
+            python scripts/ci/check_causal_trust_root.py \
+              --repository-path . \
+              --base-sha "${{ github.event.pull_request.base.sha }}" \
+              --head-sha "${{ github.event.pull_request.head.sha }}" \
+              --manifest-path .github/causal-trust-root.json \
+              --output artifacts/causal/trust-root-verification.json
           else
             echo "base-bound trust-root checker is missing outside the authorized bootstrap boundary" >&2
             exit 1
           fi
-          python "${checker}" \
-            --repository-path . \
-            --base-sha "${{ github.event.pull_request.base.sha }}" \
-            --head-sha "${{ github.event.pull_request.head.sha }}" \
-            --manifest-path .github/causal-trust-root.json \
-            --output artifacts/causal/trust-root-verification.json
 
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
@@ -116,19 +129,21 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
-          validator="scripts/ci/check_causal_workflow_contract.py"
           if git cat-file -e "${BASE_SHA}:scripts/ci/check_causal_workflow_contract.py" 2>/dev/null; then
-            validator="${RUNNER_TEMP}/check_causal_workflow_contract.base.py"
-            git show "${BASE_SHA}:scripts/ci/check_causal_workflow_contract.py" > "${validator}"
+            git show "${BASE_SHA}:scripts/ci/check_causal_workflow_contract.py" \
+              > "${RUNNER_TEMP}/check_causal_workflow_contract.base.py"
+            python "${RUNNER_TEMP}/check_causal_workflow_contract.base.py" \
+              .github/workflows/causal-pr-gate.yml \
+              --default-branch main
           elif [[ "${BASE_SHA}" == "${BOOTSTRAP_BASE_SHA}" ]]; then
             echo "bootstrap_boundary=base_has_no_workflow_validator" >&2
+            python scripts/ci/check_causal_workflow_contract.py \
+              .github/workflows/causal-pr-gate.yml \
+              --default-branch main
           else
             echo "base-bound workflow validator is missing outside the authorized bootstrap boundary" >&2
             exit 1
           fi
-          python "${validator}" \
-            .github/workflows/causal-pr-gate.yml \
-            --default-branch main
 
       - name: Run causal, trust-root, and workflow mutation tests
         shell: bash
