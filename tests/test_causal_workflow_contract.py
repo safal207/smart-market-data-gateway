@@ -180,7 +180,43 @@ def test_broadening_bootstrap_fallback_is_rejected() -> None:
         "else",
         1,
     )
-    assert_rejected(mutated, "fail closed outside the exact bootstrap base")
+    assert_rejected(mutated, "exact bootstrap guard")
+
+
+def test_inert_base_analyzer_extraction_is_rejected() -> None:
+    mutated = workflow_text().replace(
+        '> "${RUNNER_TEMP}/build_causal_pr_report.base.py"',
+        "> /dev/null",
+        1,
+    )
+    assert_rejected(mutated, "fixed extraction destination")
+
+
+def test_base_analyzer_execution_cannot_be_replaced_by_head_tool() -> None:
+    mutated = workflow_text().replace(
+        'python "${RUNNER_TEMP}/build_causal_pr_report.base.py"',
+        "python scripts/ci/build_causal_pr_report.py",
+        1,
+    )
+    assert_rejected(mutated, "fixed base-side execution")
+
+
+def test_base_trust_checker_execution_cannot_be_replaced_by_head_tool() -> None:
+    mutated = workflow_text().replace(
+        'python "${RUNNER_TEMP}/check_causal_trust_root.base.py"',
+        "python scripts/ci/check_causal_trust_root.py",
+        1,
+    )
+    assert_rejected(mutated, "fixed base-side execution")
+
+
+def test_base_workflow_validator_execution_cannot_be_replaced_by_head_tool() -> None:
+    mutated = workflow_text().replace(
+        'python "${RUNNER_TEMP}/check_causal_workflow_contract.base.py"',
+        "python scripts/ci/check_causal_workflow_contract.py",
+        1,
+    )
+    assert_rejected(mutated, "fixed base-side execution")
 
 
 def test_removing_base_bound_analyzer_is_rejected() -> None:
@@ -189,7 +225,7 @@ def test_removing_base_bound_analyzer_is_rejected() -> None:
         'echo "analyzer bypassed"',
         1,
     )
-    assert_rejected(mutated, "causal analysis must prefer")
+    assert_rejected(mutated, "base extraction")
 
 
 def test_removing_base_bound_trust_checker_is_rejected() -> None:
@@ -198,7 +234,7 @@ def test_removing_base_bound_trust_checker_is_rejected() -> None:
         'echo "trust checker bypassed"',
         1,
     )
-    assert_rejected(mutated, "trust-root validation must prefer")
+    assert_rejected(mutated, "base extraction")
 
 
 def test_removing_base_bound_workflow_validator_is_rejected() -> None:
@@ -207,16 +243,16 @@ def test_removing_base_bound_workflow_validator_is_rejected() -> None:
         'echo "workflow validator bypassed"',
         1,
     )
-    assert_rejected(mutated, "workflow validation must prefer")
+    assert_rejected(mutated, "base extraction")
 
 
 def test_removing_run_attempt_provenance_is_rejected() -> None:
     mutated = workflow_text().replace(
-        '            --run-attempt "${{ github.run_attempt }}" \\\n',
-        "",
+        '--run-attempt "${{ github.run_attempt }}"',
+        '--run-attempt "removed"',
         1,
     )
-    assert_rejected(mutated, "missing exact provenance argument")
+    assert_rejected(mutated, "provenance in established and bootstrap branches")
 
 
 def test_artifact_always_condition_is_rejected_when_weakened() -> None:
