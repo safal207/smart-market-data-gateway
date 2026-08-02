@@ -106,6 +106,17 @@ def test_established_manifest_blocks_protected_file_change(tmp_path: Path) -> No
         trust_root.verify_transition(repo, base, head, MANIFEST_PATH)
 
 
+def test_established_manifest_blocks_deleted_protected_file(tmp_path: Path) -> None:
+    repo, _, paths = init_repository(tmp_path)
+    write(repo, MANIFEST_PATH, manifest_for(repo, paths))
+    base = commit(repo, "establish manifest")
+    (repo / paths[0]).unlink()
+    head = commit(repo, "delete protected file")
+
+    with pytest.raises(trust_root.TrustRootError, match="missing from exact head"):
+        trust_root.verify_transition(repo, base, head, MANIFEST_PATH)
+
+
 def test_established_manifest_blocks_manifest_replacement(tmp_path: Path) -> None:
     repo, _, paths = init_repository(tmp_path)
     write(repo, MANIFEST_PATH, manifest_for(repo, paths))
