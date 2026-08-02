@@ -294,6 +294,24 @@ def test_existing_test_path_is_accepted(tmp_path: Path) -> None:
     assert report.regression_test_paths == ("tests/test_app.py",)
 
 
+def test_longer_fake_path_does_not_match_existing_test_suffix(tmp_path: Path) -> None:
+    repo, base = init_repo(tmp_path)
+    write(repo, "src/app.py", "def value() -> int:\n    return 2\n")
+    head = commit(repo)
+
+    report, _ = run_report(
+        tmp_path,
+        repo,
+        base,
+        head,
+        full_body("The fabricated path scripts/fake/tests/test_app.py proves the invariant."),
+    )
+
+    assert not report.passed
+    assert report.regression_test_paths == ()
+    assert any("executable change requires" in error for error in report.errors)
+
+
 def test_executable_change_without_regression_evidence_blocks(tmp_path: Path) -> None:
     repo, base = init_repo(tmp_path)
     write(repo, "src/app.py", "def value() -> int:\n    return 2\n")
@@ -362,6 +380,18 @@ def test_validator_change_without_changed_mutation_test_blocks(tmp_path: Path) -
         head,
         full_body("Existing tests/test_app.py covers only application behavior."),
     )
+
+    assert not report.passed
+    assert any("workflow mutation/regression test" in error for error in report.errors)
+
+
+def test_new_ci_validator_requires_changed_mutation_test(tmp_path: Path) -> None:
+    repo, base = init_repo(tmp_path)
+    write(repo, "scripts/ci/new_validator.py", "def validate() -> bool:\n    return True\n")
+    write(repo, "tests/test_app.py", "def test_value() -> None:\n    assert 1 == 1\n# changed\n")
+    head = commit(repo)
+
+    report, _ = run_report(tmp_path, repo, base, head, full_body())
 
     assert not report.passed
     assert any("workflow mutation/regression test" in error for error in report.errors)
@@ -458,6 +488,24 @@ def test_urls_and_secret_like_values_do_not_reach_markdown(tmp_path: Path) -> No
     assert "[REDACTED_SECRET]" in markdown
 
 
+def test_mermaid_labels_cannot_break_markdown_fence(tmp_path: Path) -> None:
+    repo, base = init_repo(tmp_path)
+    write(repo, "src/app.py", "def value() -> int:\n    return 2\n")
+    write(repo, "tests/test_app.py", "def test_value() -> None:\n    assert 2 == 2\n")
+    head = commit(repo)
+    body = full_body().replace(
+        "Every executable transition is bound to exact Git objects and regression evidence.",
+        "The invariant contains ```markdown and a quoted label but remains evidence.",
+    )
+
+    report, output = run_report(tmp_path, repo, base, head, body)
+    markdown = (output / "causal-pr-report.md").read_text(encoding="utf-8")
+
+    assert report.passed
+    assert markdown.count("```") == 2
+    assert "```markdown" not in markdown
+
+
 def test_invalid_base_sha_blocks(tmp_path: Path) -> None:
     repo, base = init_repo(tmp_path)
     write(repo, "docs/guide.md", "# Updated guide\n")
@@ -478,7 +526,24 @@ def test_dirty_worktree_blocks(tmp_path: Path) -> None:
     report, _ = run_report(tmp_path, repo, base, head, "")
 
     assert not report.passed
+    assert report.checkout_matches_head is True
+    assert report.worktree_clean is False
     assert any("worktree is dirty" in error for error in report.errors)
+
+
+def test_checkout_mismatch_is_reported_without_losing_clean_state(tmp_path: Path) -> None:
+    repo, base = init_repo(tmp_path)
+    write(repo, "docs/guide.md", "# Claimed head\n")
+    claimed_head = commit(repo, "claimed head")
+    write(repo, "docs/guide.md", "# Actual checkout\n")
+    commit(repo, "actual checkout")
+
+    report, _ = run_report(tmp_path, repo, base, claimed_head, "")
+
+    assert not report.passed
+    assert report.checkout_matches_head is False
+    assert report.worktree_clean is True
+    assert any("checkout mismatch" in error for error in report.errors)
 
 
 def test_stale_head_blocks(tmp_path: Path) -> None:
