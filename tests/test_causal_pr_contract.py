@@ -161,6 +161,75 @@ Changed tests/test_app.py proves it.
     assert any("Residual risk" in error for error in report.errors)
 
 
+def test_empty_atx_heading_terminates_current_section(tmp_path: Path) -> None:
+    repo, base = init_repo(tmp_path)
+    write(repo, "src/app.py", "def value() -> int:\n    return 2\n")
+    write(repo, "tests/test_app.py", "def test_value() -> None:\n    assert 2 == 2\n")
+    head = commit(repo)
+    body = """### Failure path
+A concrete failure path.
+
+### Invariant after change
+A concrete invariant.
+
+### Regression evidence
+Changed tests/test_app.py proves it.
+
+### Residual risk
+<!-- intentionally empty -->
+
+##
+This text belongs after an empty heading and must not fill Residual risk.
+"""
+
+    report, _ = run_report(tmp_path, repo, base, head, body)
+
+    assert not report.passed
+    assert any("Residual risk" in error for error in report.errors)
+
+
+def test_fenced_code_headings_do_not_satisfy_sections(tmp_path: Path) -> None:
+    repo, base = init_repo(tmp_path)
+    write(repo, "src/app.py", "def value() -> int:\n    return 2\n")
+    head = commit(repo)
+    body = """```markdown
+### Failure path
+A code example is not review evidence.
+### Invariant after change
+Still only code.
+### Regression evidence
+tests/test_app.py
+### Residual risk
+Still only code.
+```
+"""
+
+    report, _ = run_report(tmp_path, repo, base, head, body)
+
+    assert not report.passed
+    assert all(not present for present in report.causal_sections_present.values())
+
+
+def test_indented_code_headings_do_not_satisfy_sections(tmp_path: Path) -> None:
+    repo, base = init_repo(tmp_path)
+    write(repo, "src/app.py", "def value() -> int:\n    return 2\n")
+    head = commit(repo)
+    body = """    ### Failure path
+    A code example is not review evidence.
+    ### Invariant after change
+    Still only code.
+    ### Regression evidence
+    tests/test_app.py
+    ### Residual risk
+    Still only code.
+"""
+
+    report, _ = run_report(tmp_path, repo, base, head, body)
+
+    assert not report.passed
+    assert all(not present for present in report.causal_sections_present.values())
+
+
 def test_placeholders_block_pr(tmp_path: Path) -> None:
     repo, base = init_repo(tmp_path)
     write(repo, "src/app.py", "def value() -> int:\n    return 2\n")
@@ -169,6 +238,22 @@ def test_placeholders_block_pr(tmp_path: Path) -> None:
     body = full_body().replace(
         "A stale or unsafe transition could pass without causal evidence.",
         "TODO",
+    )
+
+    report, _ = run_report(tmp_path, repo, base, head, body)
+
+    assert not report.passed
+    assert any("Failure path" in error for error in report.errors)
+
+
+def test_multiline_placeholder_only_section_blocks_pr(tmp_path: Path) -> None:
+    repo, base = init_repo(tmp_path)
+    write(repo, "src/app.py", "def value() -> int:\n    return 2\n")
+    write(repo, "tests/test_app.py", "def test_value() -> None:\n    assert 2 == 2\n")
+    head = commit(repo)
+    body = full_body().replace(
+        "A stale or unsafe transition could pass without causal evidence.",
+        "TODO\nTBD",
     )
 
     report, _ = run_report(tmp_path, repo, base, head, body)
@@ -293,7 +378,31 @@ def test_documentation_only_change_passes_lightweight_mode(tmp_path: Path) -> No
     assert report.mode == "LIGHTWEIGHT"
 
 
-def test_rename_is_classified_by_destination_path(tmp_path: Path) -> None:
+def test_exact_tree_diff_includes_changes_present_only_on_current_base(tmp_path: Path) -> None:
+    repo, _ = init_repo(tmp_path)
+    git(repo, "checkout", "-b", "feature")
+    write(repo, "docs/guide.md", "# Feature guide\n")
+    head = commit(repo, "feature head")
+
+    git(repo, "checkout", "main")
+    write(repo, "src/app.py", "def value() -> int:\n    return 9\n")
+    advanced_base = commit(repo, "advance base")
+    git(repo, "checkout", "feature")
+
+    report, _ = run_report(
+        tmp_path,
+        repo,
+        advanced_base,
+        head,
+        full_body("Existing tests/test_app.py covers the exact tree transition."),
+    )
+
+    assert report.passed
+    assert report.mode == "STRICT"
+    assert any(item.path == "src/app.py" for item in report.changed_files)
+
+
+def test_documentation_rename_uses_source_and_destination_categories(tmp_path: Path) -> None:
     repo, base = init_repo(tmp_path)
     git(repo, "mv", "docs/guide.md", "docs/renamed-guide.md")
     head = commit(repo)
@@ -302,8 +411,30 @@ def test_rename_is_classified_by_destination_path(tmp_path: Path) -> None:
 
     renamed = next(item for item in report.changed_files if item.path == "docs/renamed-guide.md")
     assert renamed.old_path == "docs/guide.md"
+    assert renamed.old_category == "documentation"
     assert renamed.category == "documentation"
     assert report.mode == "LIGHTWEIGHT"
+
+
+def test_executable_to_documentation_rename_remains_strict(tmp_path: Path) -> None:
+    repo, base = init_repo(tmp_path)
+    git(repo, "mv", "src/app.py", "docs/app.md")
+    head = commit(repo)
+
+    report, _ = run_report(
+        tmp_path,
+        repo,
+        base,
+        head,
+        full_body("Existing tests/test_app.py records the removed executable surface."),
+    )
+
+    renamed = next(item for item in report.changed_files if item.path == "docs/app.md")
+    assert renamed.old_path == "src/app.py"
+    assert renamed.old_category == "implementation"
+    assert renamed.category == "documentation"
+    assert report.mode == "STRICT"
+    assert report.passed
 
 
 def test_urls_and_secret_like_values_do_not_reach_markdown(tmp_path: Path) -> None:
