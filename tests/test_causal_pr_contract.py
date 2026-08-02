@@ -199,6 +199,24 @@ def test_executable_change_without_regression_evidence_blocks(tmp_path: Path) ->
     assert any("executable change requires" in error for error in report.errors)
 
 
+def test_deleted_test_does_not_count_as_regression_evidence(tmp_path: Path) -> None:
+    repo, base = init_repo(tmp_path)
+    write(repo, "src/app.py", "def value() -> int:\n    return 2\n")
+    (repo / "tests/test_app.py").unlink()
+    head = commit(repo)
+
+    report, _ = run_report(
+        tmp_path,
+        repo,
+        base,
+        head,
+        full_body("Deleted tests/test_app.py used to cover this behavior."),
+    )
+
+    assert not report.passed
+    assert any("executable change requires" in error for error in report.errors)
+
+
 def test_workflow_change_without_contract_test_blocks(tmp_path: Path) -> None:
     repo, base = init_repo(tmp_path)
     write(repo, ".github/workflows/ci.yml", "name: CI\n")
@@ -210,6 +228,27 @@ def test_workflow_change_without_contract_test_blocks(tmp_path: Path) -> None:
         base,
         head,
         full_body("Existing tests/test_app.py exercises application behavior."),
+    )
+
+    assert not report.passed
+    assert any("workflow mutation/regression test" in error for error in report.errors)
+
+
+def test_validator_change_without_changed_mutation_test_blocks(tmp_path: Path) -> None:
+    repo, base = init_repo(tmp_path)
+    write(
+        repo,
+        "scripts/ci/check_causal_workflow_contract.py",
+        "def validate() -> bool:\n    return True\n",
+    )
+    head = commit(repo)
+
+    report, _ = run_report(
+        tmp_path,
+        repo,
+        base,
+        head,
+        full_body("Existing tests/test_app.py covers only application behavior."),
     )
 
     assert not report.passed
