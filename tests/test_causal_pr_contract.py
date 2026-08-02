@@ -245,9 +245,10 @@ def test_urls_and_secret_like_values_do_not_reach_markdown(tmp_path: Path) -> No
     write(repo, "src/app.py", "def value() -> int:\n    return 2\n")
     write(repo, "tests/test_app.py", "def test_value() -> None:\n    assert 2 == 2\n")
     head = commit(repo)
+    fake_token = "gh" + "p_" + "A" * 36
     body = full_body().replace(
         "Every executable transition is bound to exact Git objects and regression evidence.",
-        "See https://private.example.invalid/path and token=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890 for context.",
+        f"See https://private.example.invalid/path and token={fake_token} for context.",
     )
 
     report, output = run_report(tmp_path, repo, base, head, body)
@@ -255,7 +256,7 @@ def test_urls_and_secret_like_values_do_not_reach_markdown(tmp_path: Path) -> No
 
     assert report.passed
     assert "private.example.invalid" not in markdown
-    assert "ghp_" not in markdown
+    assert fake_token not in markdown
     assert "[REDACTED_URL]" in markdown
     assert "[REDACTED_SECRET]" in markdown
 
