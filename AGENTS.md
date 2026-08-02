@@ -12,20 +12,27 @@ Every pull request must be reviewed as an exact causal transition from `pull_req
 
 ## Trust-root changes
 
-Treat these paths as protected review surfaces:
+The exact protected tree is declared in `.github/causal-trust-root.json`. The manifest stores real Git blob IDs for the permanent workflow, analyzers, trust-root checker, and their causal/mutation tests.
 
+Protected review surfaces include:
+
+- `.github/causal-trust-root.json`
 - `.github/workflows/causal-pr-gate.yml`
 - `.github/workflows/ci.yml`
 - `scripts/ci/build_causal_pr_report.py`
 - `scripts/ci/check_causal_workflow_contract.py`
+- `scripts/ci/check_causal_trust_root.py`
 - `tests/test_causal_pr_contract.py`
 - `tests/test_causal_workflow_contract.py`
+- `tests/test_causal_trust_root.py`
 - `.github/CODEOWNERS`
 - `.github/pull_request_template.md`
 - `AGENTS.md`
 - `docs/ci/CAUSAL_PR_GATE.md`
 
-A change to a workflow or validator must include a mutation/regression test that fails when the protection is removed. Review evidence never grants merge authority. Trust-root bootstrap and replacement require independent owner review; bots may advise but may not merge.
+For an established trust root, the gate reads the manifest and checker from the exact base SHA. An ordinary PR must not change the manifest or any protected blob. A legitimate root update requires a separate bootstrap PR and may be rejected by the old root by design; that failure must not be disabled or bypassed.
+
+A change to any workflow or validator must include a mutation/regression test that fails when the protection is removed. Review evidence never grants merge authority. Trust-root bootstrap and replacement require independent owner review; bots may advise but may not merge.
 
 ## Modes
 
