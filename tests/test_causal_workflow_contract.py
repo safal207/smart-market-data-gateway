@@ -137,13 +137,59 @@ def test_removing_edited_event_is_rejected() -> None:
     assert_rejected(mutated, "event types missing")
 
 
-def test_weakened_permissions_are_rejected() -> None:
+def test_weakened_gate_permissions_are_rejected() -> None:
     mutated = workflow_text().replace(
         "    permissions:\n      contents: read\n",
         "    permissions:\n      contents: write\n",
         1,
     )
     assert_rejected(mutated, "permissions must be exactly")
+
+
+def test_zero_timeout_is_rejected() -> None:
+    mutated = workflow_text().replace("    timeout-minutes: 20\n", "    timeout-minutes: 0\n", 1)
+    assert_rejected(mutated, "positive ASCII timeout")
+
+
+def test_non_ascii_timeout_is_rejected() -> None:
+    mutated = workflow_text().replace("    timeout-minutes: 20\n", "    timeout-minutes: ٢٠\n", 1)
+    assert_rejected(mutated, "positive ASCII timeout")
+
+
+def test_concurrency_binding_removal_is_rejected() -> None:
+    mutated = workflow_text().replace(
+        "group: ${{ github.workflow }}-${{ github.event.pull_request.number }}",
+        "group: causal-pr-gate",
+        1,
+    )
+    assert_rejected(mutated, "concurrency group")
+
+
+def test_bootstrap_base_change_is_rejected() -> None:
+    mutated = workflow_text().replace(
+        contract.BOOTSTRAP_BASE_SHA,
+        "1" * 40,
+        1,
+    )
+    assert_rejected(mutated, "authorized bootstrap base SHA")
+
+
+def test_broadening_bootstrap_fallback_is_rejected() -> None:
+    mutated = workflow_text().replace(
+        'elif [[ "${BASE_SHA}" == "${BOOTSTRAP_BASE_SHA}" ]]; then',
+        "else",
+        1,
+    )
+    assert_rejected(mutated, "fail closed outside the exact bootstrap base")
+
+
+def test_removing_base_bound_analyzer_is_rejected() -> None:
+    mutated = workflow_text().replace(
+        'git show "${BASE_SHA}:scripts/ci/build_causal_pr_report.py"',
+        'echo "analyzer bypassed"',
+        1,
+    )
+    assert_rejected(mutated, "causal analysis must prefer")
 
 
 def test_removing_base_bound_trust_checker_is_rejected() -> None:
@@ -153,6 +199,52 @@ def test_removing_base_bound_trust_checker_is_rejected() -> None:
         1,
     )
     assert_rejected(mutated, "trust-root validation must prefer")
+
+
+def test_removing_base_bound_workflow_validator_is_rejected() -> None:
+    mutated = workflow_text().replace(
+        'git show "${BASE_SHA}:scripts/ci/check_causal_workflow_contract.py"',
+        'echo "workflow validator bypassed"',
+        1,
+    )
+    assert_rejected(mutated, "workflow validation must prefer")
+
+
+def test_removing_run_attempt_provenance_is_rejected() -> None:
+    mutated = workflow_text().replace(
+        '            --run-attempt "${{ github.run_attempt }}" \\\n',
+        "",
+        1,
+    )
+    assert_rejected(mutated, "missing exact provenance argument")
+
+
+def test_artifact_always_condition_is_rejected_when_weakened() -> None:
+    mutated = workflow_text().replace("if: ${{ always() }}", "if: ${{ success() }}", 1)
+    assert_rejected(mutated, "always")
+
+
+def test_artifact_attempt_marker_is_required() -> None:
+    mutated = workflow_text().replace(
+        "name: causal-pr-${{ github.event.pull_request.head.sha }}-${{ github.run_id }}-${{ github.run_attempt }}",
+        "name: causal-pr-${{ github.event.pull_request.head.sha }}-${{ github.run_id }}",
+        1,
+    )
+    assert_rejected(mutated, "artifact name missing provenance marker")
+
+
+def test_codeql_fork_condition_change_is_rejected() -> None:
+    mutated = workflow_text().replace(
+        "if: ${{ github.event.pull_request.head.repo.fork == false }}",
+        "if: ${{ true }}",
+        1,
+    )
+    assert_rejected(mutated, "CodeQL must explicitly skip fork PRs")
+
+
+def test_codeql_permissions_change_is_rejected() -> None:
+    mutated = workflow_text().replace("      security-events: write\n", "      security-events: read\n", 1)
+    assert_rejected(mutated, "CodeQL job permissions")
 
 
 def test_removing_exact_tree_test_is_rejected() -> None:
