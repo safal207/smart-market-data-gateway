@@ -9,10 +9,10 @@
     "pyproject.toml": "8770f5929f4957559213400a630ff2377da1af87",
     "scripts/ci/build_causal_pr_report.py": "7482652eec28335ce40facae9010b734dc5193bb",
     "scripts/ci/check_causal_trust_root.py": "9dea68e82bcd3ec34e69339925074b3c2497dc0a",
-    "scripts/ci/check_causal_workflow_contract.py": "91e91601bf5accf1ec22b2c8eae9494572119d89",
+    "scripts/ci/check_causal_workflow_contract.py": "88cf9b6bd9d9df8ceac9b6c2eb9a44e559b610c9",
     "tests/test_causal_pr_contract.py": "a1fdb31f6382559f4393f59b24801f5b928477a4",
     "tests/test_causal_trust_root.py": "dd230e11787b0aec49c61953f76fa30ca8e921ff",
-    "tests/test_causal_workflow_contract.py": "280cf4480dab4eaee02d3d4a34c452ae07eeeb31"
+    "tests/test_causal_workflow_contract.py": "d3450bc2e643490bcdea26d9b638a23973c723d4"
   },
   "schema_version": 1
 }
