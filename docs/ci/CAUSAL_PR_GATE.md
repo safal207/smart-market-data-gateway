@@ -10,7 +10,7 @@ The permanent required-check name is:
 Causal PR Gate
 ```
 
-After the bootstrap pull request is independently reviewed and merged, the repository owner must add that exact status-check name to the required checks for the default branch.
+After the bootstrap pull request is reviewed and merged, the repository owner must add that exact status-check name to the required checks for the default branch.
 
 ## Exact-head binding
 
@@ -135,7 +135,25 @@ Mutation tests reject:
 
 All external actions are pinned to full 40-character commit SHAs. Jobs have explicit timeouts and minimum permissions. Concurrency cancels stale runs for the same PR.
 
-`CODEOWNERS` marks trust surfaces for owner review. Repository branch settings must require code-owner or equivalent independent review for that declaration to have enforcement authority.
+`CODEOWNERS` identifies trust surfaces and becomes an enforceable approval boundary only when repository settings require code-owner review. Solo-maintainer repositories are not required to enable that setting.
+
+## Automated review policy for solo maintainers
+
+A solo repository owner may use automated review agents instead of waiting for an unavailable human developer.
+
+The merge protocol is:
+
+1. request review from at least one available independent automated reviewer, such as Codex or CodeRabbit;
+2. prefer two different reviewers for trust-root changes when both are available, but do not make the second reviewer a permanent availability dependency;
+3. bind every request and conclusion to the current exact head SHA;
+4. after any new commit, discard stale conclusions and request review again;
+5. resolve every actionable finding and leave no unresolved review thread;
+6. require `Causal PR Gate`, repository CI, security scans, and applicable CodeQL jobs to pass on the same head;
+7. let the repository owner make the final merge decision manually.
+
+A reviewer that is unavailable, rate-limited, or unable to inspect a Draft PR must be reported honestly. It does not permanently block a solo maintainer when another reviewer has completed the exact-head review and the causal evidence is green.
+
+Review agents provide adversarial analysis, not merge authority. No bot, artifact, approval comment, or green status may trigger automatic merge by itself.
 
 ## Failure recovery
 
@@ -154,7 +172,7 @@ The repository had no pre-existing in-tree protected-files manifest before versi
 
 After bootstrap merge, future ordinary PRs use the exact base checker and base manifest. A later legitimate trust-root replacement must be a separate bootstrap. The old trust-root gate may and should reject that replacement because the current root cannot grant authority to its own successor. That single red trust-root result is an expected bootstrap boundary and must not be disabled or bypassed.
 
-The bootstrap remains a separate Draft PR. It is not mixed into a feature PR. Merge requires independent human/bot review of the exact head SHA. No bot review, artifact, approval comment, or green status grants merge authority.
+The bootstrap remains a separate Draft PR until the owner intentionally marks it ready. It is not mixed into a feature PR. For a solo maintainer, merge requires an exact-head automated review from at least one available reviewer, green causal evidence, green non-bootstrap checks, and resolution of all findings. Two automated reviewers are preferred for trust-root changes when available. The owner alone performs the manual merge.
 
 ## Residual limits
 
@@ -162,7 +180,7 @@ The gate does not independently control GitHub branch rules. A repository admini
 
 The owner must complete the final enforcement step after merge:
 
-1. independently inspect and merge the bootstrap;
+1. inspect the exact-head automated review and causal evidence, then merge manually;
 2. add `Causal PR Gate` to required status checks on the default branch;
-3. require independent/code-owner review for protected causal-CI paths;
-4. keep force-push disabled on the default branch.
+3. keep force-push disabled on the default branch;
+4. enable human or code-owner approval later when a real team exists and the repository wants that additional boundary.
