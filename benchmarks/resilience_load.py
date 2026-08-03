@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from datetime import UTC, datetime
 import json
 from pathlib import Path
 import random
@@ -10,67 +9,16 @@ import time
 from typing import Any
 
 import httpx
-import websockets
 
-from smart_market_data_gateway.resilience_evidence import quote_was_received_after
-
-
-def websocket_url(base: str, token: str) -> str:
-    separator = "&" if "?" in base else "?"
-    return f"{base}{separator}token={token}"
-
-
-async def connect_and_subscribe(
-    client_id: int,
-    *,
-    url: str,
-    symbols: list[str],
-) -> Any:
-    socket = await websockets.connect(
-        websocket_url(url, f"dev-pro:resilience-{client_id}"),
-        open_timeout=10,
-        close_timeout=3,
-        ping_interval=20,
-        ping_timeout=20,
-    )
-    await asyncio.wait_for(socket.recv(), timeout=10)
-    await socket.send(
-        json.dumps(
-            {
-                "action": "subscribe",
-                "symbols": symbols,
-                "channels": ["quote"],
-                "request_id": f"resilience-{client_id}",
-            },
-            separators=(",", ":"),
-        )
-    )
-    return socket
+from smart_market_data_gateway.resilience_client import (
+    ResilienceSocket,
+    connect_and_subscribe,
+    receive_quote,
+    receive_quote_after_marker,
+)
 
 
-async def receive_quote(socket: Any, timeout_seconds: float) -> dict[str, Any]:
-    async with asyncio.timeout(timeout_seconds):
-        while True:
-            raw = await socket.recv()
-            payload = json.loads(raw)
-            if payload.get("type") == "quote":
-                return dict(payload["data"]["quote"])
-
-
-async def receive_quote_after(
-    socket: Any,
-    *,
-    cutoff: datetime,
-    timeout_seconds: float,
-) -> bool:
-    async with asyncio.timeout(timeout_seconds):
-        while True:
-            quote = await receive_quote(socket, timeout_seconds)
-            if quote_was_received_after(quote, cutoff):
-                return True
-
-
-async def close_sockets(sockets: list[Any]) -> None:
+async def close_sockets(sockets: list[ResilienceSocket]) -> None:
     await asyncio.gather(
         *(socket.close() for socket in sockets),
         return_exceptions=True,
@@ -96,10 +44,10 @@ async def reconnect_storm(
         return_exceptions=True,
     )
     initial_sockets = [
-        socket for socket in initial if not isinstance(socket, Exception)
+        socket for socket in initial if not isinstance(socket, BaseException)
     ]
     initial_errors = [
-        str(error) for error in initial if isinstance(error, Exception)
+        str(error) for error in initial if isinstance(error, BaseException)
     ]
     await close_sockets(initial_sockets)
 
@@ -113,10 +61,10 @@ async def reconnect_storm(
     )
     elapsed = time.perf_counter() - started
     reconnected_sockets = [
-        socket for socket in reconnected if not isinstance(socket, Exception)
+        socket for socket in reconnected if not isinstance(socket, BaseException)
     ]
     reconnect_errors = [
-        str(error) for error in reconnected if isinstance(error, Exception)
+        str(error) for error in reconnected if isinstance(error, BaseException)
     ]
     quote_results = await asyncio.gather(
         *(receive_quote(socket, args.timeout) for socket in reconnected_sockets),
@@ -150,7 +98,7 @@ async def zombie_cleanup(
         return_exceptions=True,
     )
     sockets = [
-        socket for socket in connected if not isinstance(socket, Exception)
+        socket for socket in connected if not isinstance(socket, BaseException)
     ]
     before = await fetch_stats(args.stats_url)
     abrupt_count = (
@@ -190,7 +138,7 @@ async def frozen_stream(
         return_exceptions=True,
     )
     sockets = [
-        socket for socket in connected if not isinstance(socket, Exception)
+        socket for socket in connected if not isinstance(socket, BaseException)
     ]
     first_results = await asyncio.gather(
         *(receive_quote(socket, args.timeout) for socket in sockets),
@@ -201,24 +149,19 @@ async def frozen_stream(
     )
     await asyncio.sleep(args.pause_seconds)
 
-    # Quotes already queued before this instant are backlog by definition. Recovery is
-    # credited only after the gateway emits a quote whose own receive timestamp is later
-    # than the cutoff; merely observing a later provider timestamp cannot pass the test.
-    resume_cutoff = datetime.now(UTC)
+    # A matching pong on each ordered WebSocket is the recovery boundary. Messages
+    # received before that pong are discarded as backlog. This avoids comparing clocks
+    # between the benchmark host and the gateway host.
     resumed = await asyncio.gather(
         *(
-            receive_quote_after(
-                socket,
-                cutoff=resume_cutoff,
-                timeout_seconds=args.timeout,
-            )
+            receive_quote_after_marker(socket, args.timeout)
             for socket in sockets
         ),
         return_exceptions=True,
     )
-    recovered = sum(result is True for result in resumed)
+    recovered = sum(isinstance(result, dict) for result in resumed)
     errors = [
-        str(result) for result in resumed if isinstance(result, Exception)
+        str(result) for result in resumed if isinstance(result, BaseException)
     ]
     await close_sockets(sockets)
 
@@ -226,8 +169,7 @@ async def frozen_stream(
         "connected_clients": len(sockets),
         "clients_with_initial_quote": clients_with_initial_quote,
         "pause_seconds": args.pause_seconds,
-        "resume_cutoff": resume_cutoff.isoformat(),
-        "clients_with_post_resume_quote": recovered,
+        "clients_with_quote_after_pong_marker": recovered,
         "failed_or_frozen_clients": len(sockets) - recovered,
         "errors": errors[:100],
     }
