@@ -53,7 +53,9 @@ stored payloads still match their digests, all links are continuous, sequence
 numbers have no gaps, the persisted head matches the verified chain, and every
 quote-history row has a corresponding integrity record.
 
-Replay verifies integrity by default. The explicit
+Replay verifies integrity by default. Verification and replay read from the same
+read-only `repeatable_read` PostgreSQL snapshot, so replay cannot include a row
+that was committed after the successful verification scan. The explicit
 `--skip-integrity-verification` flag exists for controlled forensic recovery,
 not routine data processing. Feature generation and model training should use
 the same fail-closed default.
@@ -80,6 +82,40 @@ accepted Redis event
 
 Graph calculation, feature generation, prediction, and ML remain outside this
 transaction and outside the quote-delivery hot path.
+
+## Single history-state owner
+
+Candle construction is stateful. Redis consumer groups may distribute messages
+between consumers, but two independent in-memory candle builders would each see
+only part of an instrument's event sequence and could overwrite one another's
+partial OHLC values.
+
+The history worker therefore holds a session-level PostgreSQL advisory lock for
+its full lifetime. A second worker fails at startup instead of producing
+silently incomplete candles. Symbol partitioning with explicit ownership may
+replace this singleton boundary in a later version, but it must come with
+executable handoff and ordering tests.
+
+## Retention safety boundary
+
+Raw quote payloads and their integrity records currently form one verification
+unit. Deleting `quote_events` while preserving `accepted_event_integrity` would
+leave a hash-chain record without the canonical payload needed to recompute its
+digest. The verifier would correctly report `missing quote payload`, and normal
+replay would remain fail-closed.
+
+For that reason, market-data retention is currently **disabled even when the
+configuration flag is set**. At startup the history worker removes any existing
+TimescaleDB retention policies and rejects an enabled retention configuration.
+Retention may be enabled only after one of these designs is implemented and
+tested:
+
+- canonical payloads are retained for every surviving integrity record; or
+- a verifiable truncation/checkpoint protocol defines the first retained chain
+  state and is validated by both `smdg-verify-history` and replay.
+
+A storage-saving policy must never turn retained history into unverifiable
+history.
 
 ## Executable crash matrix
 
@@ -123,7 +159,8 @@ can construct a new internally consistent history.
 
 This repository now has executable evidence for deterministic hashing, chain
 verification, two important process-crash windows, exactly-once database
-effects under redelivery, and fail-closed replay by default.
+effects under redelivery, one-snapshot verification and replay, singleton candle
+state ownership, and fail-closed replay by default.
 
 It does not prove sudden-power-loss durability on arbitrary hardware, hostile
 storage correctness, distributed consensus, exchange-grade timestamp precision,
@@ -135,4 +172,4 @@ predictive alpha, or causal truth.
 2. Anchor checkpoint hashes in a separate account or immutable object store.
 3. Add real subprocess termination tests in addition to in-process failpoints.
 4. Verify chain checkpoints before replay, feature generation, and model runs.
-5. Preserve integrity records longer than raw market-data retention windows.
+5. Design and prove verifiable truncation before enabling raw-data retention.
