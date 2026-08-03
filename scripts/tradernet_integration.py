@@ -10,13 +10,10 @@ from pathlib import Path
 import time
 from typing import Any
 
+from smart_market_data_gateway.collector import build_provider
 from smart_market_data_gateway.config import Settings
 from smart_market_data_gateway.domain import QuoteEvent
-from smart_market_data_gateway.providers import (
-    TradernetMode,
-    TradernetProviderAdapter,
-    TradernetProviderConfig,
-)
+from smart_market_data_gateway.providers import TradernetProviderAdapter
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,24 +27,6 @@ class CollectionResult:
     last_timestamp: str | None
 
 
-def build_provider(settings: Settings) -> TradernetProviderAdapter:
-    return TradernetProviderAdapter(
-        TradernetProviderConfig(
-            mode=TradernetMode(settings.tradernet_mode),
-            websocket_url=settings.tradernet_websocket_url,
-            snapshot_base_url=settings.tradernet_snapshot_base_url,
-            sid=settings.tradernet_sid,
-            user_id=settings.tradernet_user_id,
-            api_key=settings.tradernet_api_key,
-            api_secret=settings.tradernet_api_secret,
-            require_authenticated_sid=settings.tradernet_require_authenticated_sid,
-            snapshot_fallback=settings.tradernet_snapshot_fallback,
-            connect_timeout_seconds=settings.tradernet_connect_timeout_seconds,
-            snapshot_timeout_seconds=settings.tradernet_snapshot_timeout_seconds,
-        )
-    )
-
-
 async def collect_events(
     provider: TradernetProviderAdapter,
     *,
@@ -55,10 +34,13 @@ async def collect_events(
     timeout_seconds: float,
 ) -> CollectionResult:
     started = time.perf_counter()
+    first_event_ms: float | None = None
     events: list[QuoteEvent] = []
     try:
         async with asyncio.timeout(timeout_seconds):
             async for event in provider.events():
+                if first_event_ms is None:
+                    first_event_ms = (time.perf_counter() - started) * 1000
                 events.append(event)
                 if len(events) >= target_events:
                     break
@@ -82,9 +64,7 @@ async def collect_events(
         symbols=sorted({event.symbol for event in events}),
         duplicate_event_ids=duplicate_ids,
         timestamp_rollbacks=rollbacks,
-        time_to_first_event_ms=(
-            (time.perf_counter() - started) * 1000 if first is not None else None
-        ),
+        time_to_first_event_ms=first_event_ms if first is not None else None,
         first_timestamp=first.provider_timestamp.isoformat() if first is not None else None,
         last_timestamp=last.provider_timestamp.isoformat() if last is not None else None,
     )
@@ -98,6 +78,8 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
         if symbol.strip()
     ]
     provider = build_provider(settings)
+    if not isinstance(provider, TradernetProviderAdapter):
+        raise TypeError("Tradernet integration requires SMDG_PROVIDER=tradernet")
     await provider.subscribe(symbols)
 
     await provider.connect()
