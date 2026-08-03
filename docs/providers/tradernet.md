@@ -4,58 +4,46 @@ This adapter is read-only and implements market-data ingestion only. It does not
 
 ## Confirmed protocol facts
 
-The following facts are supported by the current Tradernet documentation snapshot and prior project tests:
+The following facts are supported by the current Tradernet documentation snapshot and project tests:
 
 - Public WebSocket endpoint: `wss://wss.tradernet.com/`.
 - SID session connection: `wss://wss.tradernet.com/?SID=<sid>`.
 - Requests and responses use JSON frames shaped as `[event, data]`.
-- Quote subscription replaces the watched list with `[
-  "quotes", ["AAPL.US", "MSFT.US"]
-]`.
+- Quote subscription replaces the watched list with `["quotes", ["AAPL.US", "MSFT.US"]]`.
 - Quote updates arrive as event `q`; the adapter also accepts `quotes` for compatibility with previously observed traffic.
-- Quote fields include `c` (ticker), `ltp` (last price), `bbp` (best bid), `bap` (best ask), and `ltt` (last trade time).
+- Quote fields include `c`, `ltp`, `bbp`, `bap`, and `ltt`.
 - On connection the server can emit `userData` with `isDemo` and `mode`.
-- A rejected or expired SID can silently fall back to demo mode; strict SID mode therefore treats demo `userData` as authentication failure.
+- A rejected or expired SID can silently fall back to demo mode.
 - Public HTTP snapshots are available from `/securities/export?tickers=...`.
-- Multiple snapshot tickers are separated with a literal `+`. Encoding the separator as `%2B` previously returned an empty result, so the adapter builds this URL explicitly.
-- Tradernet API errors can be returned inside an HTTP 200 response. The adapter checks `code`, `error`, and `errMsg` before accepting a payload.
+- Multiple snapshot tickers require a literal `+` separator.
+- Tradernet API errors can be returned inside an HTTP 200 response.
 
-Prior project testing also observed a development endpoint shaped as:
-
-```text
-wss://wssdev.tradernet.dev?user_id=<id>&SID=<sid>
-```
-
-The endpoint is not hard-coded. It can be selected through `SMDG_TRADERNET_WEBSOCKET_URL`.
-
-## Adapter modes
+## Adapter modes and authentication boundary
 
 | Mode | Purpose | Required values | Behaviour |
 |---|---|---|---|
-| `public_demo` | Isolated minimum-symbol technical testing | none | Demo `userData` is accepted |
-| `sid_session` | Closed integration test for an authenticated user | `SMDG_TRADERNET_SID`; optional `SMDG_TRADERNET_USER_ID` | Demo fallback is rejected by default |
-| `api_key` | Future signed API integration | API key and secret | Rejected until the current HMAC canonical-string contract is verified |
+| `public_demo` | Isolated minimum-symbol technical testing | none | SID and user ID values are ignored even if present in the environment |
+| `sid_session` | Closed authenticated integration test | SID; optional user ID | Quote delivery and snapshot fallback remain blocked until non-demo `userData` explicitly confirms the session |
+| `api_key` | Future signed API integration | API key and secret | Rejected until the HMAC canonical-string contract is verified |
 
-No credential is placed in URLs written to logs, reports, fixtures, or benchmark artifacts.
+Strict SID mode is fail-closed. Quote frames received before confirmation are withheld, demo fallback closes the socket, and a session that never confirms produces no quote output. Credentials are never placed in public-demo URLs, logs, reports, fixtures, or benchmark artifacts.
 
 ## Normalization decisions
 
 - Symbols are upper-cased and retain exchange suffixes such as `AAPL.US`.
 - Decimal commas are converted to decimal points.
 - Price selection order is `ltp`, bid/ask midpoint, bid, ask.
-- Tradernet does not provide a stable event ID in documented quote events. A deterministic UUID is derived from ticker, price fields, trade time, size, volume, and trade count so identical frames can be deduplicated.
-- Documented `ltt` examples have no timezone. Timezone-aware values are preserved; timezone-free values use gateway receive time. This avoids producing false exchange-latency measurements.
-- No sequence number is invented. Gap detection remains available when a future payload supplies a real sequence.
+- A deterministic UUID is derived from the observed quote fields because the documented protocol does not expose a stable event ID.
+- Timezone-aware `ltt` values are preserved; timezone-free values use gateway receive time to avoid false exchange-latency claims.
+- No sequence number is invented.
 
 ## Snapshot fallback
 
-When the WebSocket receive loop fails, the adapter can fetch one current HTTP snapshot for all active symbols before the collector reconnects. The fallback is controlled by:
+When a confirmed stream fails, the adapter can fetch one current HTTP snapshot for the active symbols before reconnect. Strict SID sessions cannot use snapshot fallback before authentication confirmation.
 
 ```env
 SMDG_TRADERNET_SNAPSHOT_FALLBACK=true
 ```
-
-The collector still owns exponential backoff and subscription restoration.
 
 ## Local setup
 
@@ -86,38 +74,53 @@ python scripts/tradernet_integration.py \
   --timeout 30
 ```
 
-The report verifies delivery before and after reconnect, duplicate event IDs, and timestamp rollbacks. It contains no SID, user ID, API key, or secret.
+## Benchmark attestation
 
-## Benchmark profiles
+Every staged provider benchmark requires a fresh JSON attestation bound to the exact gateway URL. There is no default data-mode flag that can silently mislabel an authenticated target.
 
-| Profile | Gateway clients | Symbols per client | Purpose |
-|---|---:|---:|---|
-| `smoke` | 10 | 5 | Contract and connectivity |
-| `medium` | 100–500 | 20 | Aggregation, QoS, latency |
-| `load` | 1,000–10,000 | 20 | Capacity and resource saturation |
-| `legacy-673` | configurable | 673 total provider symbols | Licensed-only regression for the historical oversized subscription set; requires `--licensing-approved` |
-| `reconnect-storm` | configurable | 5–20 | Simultaneous disconnect/reconnect behaviour |
-| `frozen-stream` | configurable | 5–20 | Pause reads, drain buffered backlog, then verify a newer timestamp arrives |
-| `zombie-cleanup` | configurable | 5–20 | Abrupt client loss and subscription cleanup |
+```json
+{
+  "provider": "tradernet",
+  "data_mode": "demo",
+  "gateway_url": "ws://localhost:8000/v1/stream",
+  "deployment_commit_sha": "<deployed-sha>",
+  "environment": "isolated-test",
+  "issuer": "<responsible-operator>",
+  "issued_at": "2026-08-04T00:00:00Z",
+  "licensing_approved_for_publication": false
+}
+```
 
-Synthetic and deployed measurements must be reported separately. Real-provider artifacts must record the commit SHA, environment, symbol set, market session, account mode, and licensing approval.
+Run a profile:
+
+```bash
+python benchmarks/run_tradernet_profile.py \
+  --profile smoke \
+  --attestation provider-attestation.json \
+  --symbols AAPL.US,MSFT.US,NVDA.US,TSLA.US,AMZN.US \
+  --market-session open
+```
+
+The attestation must identify Tradernet, match the target URL, be timezone-aware, and be no older than 24 hours by default. SID-backed and `legacy-673` reports require `licensing_approved_for_publication: true`.
+
+## Resilience profiles
+
+| Profile | Purpose |
+|---|---|
+| `reconnect-storm` | Simultaneous disconnect and reconnect behaviour |
+| `frozen-stream` | Credit recovery only when a quote carries a gateway `received_at` later than the resume cutoff; queued backlog cannot pass |
+| `zombie-cleanup` | Abrupt client loss and subscription cleanup |
 
 ## Unresolved release gates
 
-The following remain unknown until written provider/exchange terms are reviewed:
+Written provider and exchange terms must still resolve:
 
 - temporary and persistent caching rights;
 - display and non-display use;
-- redistribution to multiple end users through REST or WebSocket;
+- redistribution through REST or WebSocket;
 - commercial subscription tiers;
 - historical storage;
 - publication of raw payloads or provider-backed benchmark results;
 - attribution, geography, device, and user-count obligations.
 
-Until these are resolved, Tradernet is enabled only for isolated technical testing with the minimum symbol set. SID-backed publication and the `legacy-673` profile are blocked unless explicit licensing approval is supplied.
-
-## Reference documentation
-
-- `https://tradernet.com/tradernet-api/auth-login?site_lang=en`
-- `https://tradernet.com/tradernet-api/quotes-get-changes?site_lang=en`
-- `https://tradernet.com/tradernet-api/quotes-get?site_lang=en`
+Until these are approved, Tradernet remains limited to isolated minimum-symbol technical testing.
