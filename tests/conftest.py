@@ -14,7 +14,8 @@ from smart_market_data_gateway.migrations import migrate
 def migrated_test_database() -> None:
     database_url = os.getenv("TEST_DATABASE_URL")
     if database_url:
-        asyncio.run(migrate(database_url, Path("migrations")))
+        migrations_dir = Path(__file__).resolve().parents[1] / "migrations"
+        asyncio.run(migrate(database_url, migrations_dir))
 
 
 @pytest.fixture
@@ -37,5 +38,7 @@ async def redis_client(test_settings: Settings):
     redis = Redis.from_url(test_settings.redis_url, decode_responses=True)
     await redis.flushdb()
     yield redis
-    await redis.flushdb()
-    await redis.aclose()
+    try:
+        await redis.flushdb()
+    finally:
+        await redis.aclose()
