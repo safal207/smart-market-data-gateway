@@ -48,13 +48,15 @@ class ReplayService:
         return emitted
 
 
-async def postgres_events(
-    pool: asyncpg.Pool,
+async def postgres_events_from_connection(
+    connection: asyncpg.Connection,
     *,
     start: datetime | None = None,
     end: datetime | None = None,
     symbols: tuple[str, ...] = (),
 ) -> AsyncIterator[AcceptedQuoteEvent]:
+    if not connection.is_in_transaction():
+        raise RuntimeError("replay source requires an active snapshot transaction")
     normalized_symbols = [symbol.strip().upper() for symbol in symbols if symbol.strip()]
     query = """
         SELECT payload::text
@@ -68,17 +70,33 @@ async def postgres_events(
           accepted_at,
           event_id
     """
+    cursor = connection.cursor(
+        query,
+        start,
+        end,
+        normalized_symbols or None,
+        prefetch=500,
+    )
+    async for row in cursor:
+        yield AcceptedQuoteEvent.model_validate_json(row["payload"])
+
+
+async def postgres_events(
+    pool: asyncpg.Pool,
+    *,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    symbols: tuple[str, ...] = (),
+) -> AsyncIterator[AcceptedQuoteEvent]:
     async with pool.acquire() as connection:
-        async with connection.transaction():
-            cursor = connection.cursor(
-                query,
-                start,
-                end,
-                normalized_symbols or None,
-                prefetch=500,
-            )
-            async for row in cursor:
-                yield AcceptedQuoteEvent.model_validate_json(row["payload"])
+        async with connection.transaction(isolation="repeatable_read", readonly=True):
+            async for accepted in postgres_events_from_connection(
+                connection,
+                start=start,
+                end=end,
+                symbols=symbols,
+            ):
+                yield accepted
 
 
 def parse_speed(value: str) -> float | None:
@@ -141,35 +159,13 @@ class RedisStreamEmitter:
 async def _run(args: argparse.Namespace) -> int:
     if not settings.database_url:
         raise ValueError("SMDG_DATABASE_URL is required for replay")
-    pool = await asyncpg.create_pool(
+    connection = await asyncpg.connect(
         dsn=settings.database_url,
-        min_size=1,
-        max_size=2,
         command_timeout=settings.history_command_timeout_seconds,
     )
     output_handle: TextIO | None = None
     redis: Redis | None = None
     try:
-        if not args.skip_integrity_verification:
-            async with pool.acquire() as connection:
-                verification = await verify_accepted_event_chain(connection)
-            print(
-                "history_integrity_verified="
-                f"{verification.event_count}:{verification.head_record_hash or 'empty'}",
-                file=sys.stderr,
-            )
-        else:
-            print(
-                "warning=history_integrity_verification_skipped",
-                file=sys.stderr,
-            )
-
-        source = postgres_events(
-            pool,
-            start=parse_timestamp(args.start),
-            end=parse_timestamp(args.end),
-            symbols=tuple(args.symbol),
-        )
         if args.output_stream:
             redis = Redis.from_url(settings.redis_url, decode_responses=True)
             emitter: Emitter = RedisStreamEmitter(
@@ -187,14 +183,38 @@ async def _run(args: argparse.Namespace) -> int:
             else:
                 output_handle = sys.stdout
             emitter = JsonlEmitter(output_handle)
-        service = ReplayService(source, emitter)
-        return await service.run(speed=parse_speed(args.speed))
+
+        async with connection.transaction(isolation="repeatable_read", readonly=True):
+            if not args.skip_integrity_verification:
+                verification = await verify_accepted_event_chain(
+                    connection,
+                    use_existing_snapshot=True,
+                )
+                print(
+                    "history_integrity_verified="
+                    f"{verification.event_count}:{verification.head_record_hash or 'empty'}",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    "warning=history_integrity_verification_skipped",
+                    file=sys.stderr,
+                )
+
+            source = postgres_events_from_connection(
+                connection,
+                start=parse_timestamp(args.start),
+                end=parse_timestamp(args.end),
+                symbols=tuple(args.symbol),
+            )
+            service = ReplayService(source, emitter)
+            return await service.run(speed=parse_speed(args.speed))
     finally:
         if output_handle is not None and args.output:
             await asyncio.to_thread(output_handle.close)
         if redis is not None:
             await redis.aclose()
-        await pool.close()
+        await connection.close()
 
 
 def build_parser() -> argparse.ArgumentParser:
