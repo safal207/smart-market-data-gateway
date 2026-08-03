@@ -159,12 +159,24 @@ async def frozen_stream(args: argparse.Namespace, assignments: list[list[str]]) 
     async def receive_advanced(socket: Any, first: dict[str, Any] | None) -> bool:
         if first is None:
             return False
-        first_timestamp = datetime.fromisoformat(str(first["provider_timestamp"]))
+
+        reference_timestamp = datetime.fromisoformat(str(first["provider_timestamp"]))
+        drain_deadline = asyncio.get_running_loop().time() + min(1.0, args.timeout / 4)
+        while asyncio.get_running_loop().time() < drain_deadline:
+            try:
+                buffered = await receive_quote(socket, 0.01)
+            except TimeoutError:
+                break
+            buffered_timestamp = datetime.fromisoformat(
+                str(buffered["provider_timestamp"])
+            )
+            reference_timestamp = max(reference_timestamp, buffered_timestamp)
+
         async with asyncio.timeout(args.timeout):
             while True:
                 quote = await receive_quote(socket, args.timeout)
                 timestamp = datetime.fromisoformat(str(quote["provider_timestamp"]))
-                if timestamp > first_timestamp:
+                if timestamp > reference_timestamp:
                     return True
 
     resumed = await asyncio.gather(
