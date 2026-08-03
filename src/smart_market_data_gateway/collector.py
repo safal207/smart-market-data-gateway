@@ -16,6 +16,9 @@ from smart_market_data_gateway.providers import (
     MockMarketDataProvider,
     MockProviderConfig,
     ProviderState,
+    TradernetMode,
+    TradernetProviderAdapter,
+    TradernetProviderConfig,
 )
 from smart_market_data_gateway.storage import RedisStore
 
@@ -180,24 +183,65 @@ class CollectorService:
         self._closed = True
 
 
+def build_provider(config: Settings) -> MarketDataProvider:
+    provider_name = config.provider.strip().lower()
+    if provider_name == "mock":
+        return MockMarketDataProvider(
+            MockProviderConfig(
+                interval_seconds=config.mock_interval_seconds,
+                duplicate_every=config.mock_duplicate_every,
+                fail_after_events=config.mock_fail_after_events,
+            )
+        )
+    if provider_name in {"tradernet", "freedom", "freedom24"}:
+        try:
+            mode = TradernetMode(config.tradernet_mode)
+        except ValueError as exc:
+            raise ValueError(
+                "SMDG_TRADERNET_MODE must be public_demo or sid_session"
+            ) from exc
+        if mode is TradernetMode.API_KEY:
+            raise ValueError(
+                "SMDG_TRADERNET_MODE=api_key is disabled until the Tradernet HMAC contract is verified"
+            )
+        return TradernetProviderAdapter(
+            TradernetProviderConfig(
+                mode=mode,
+                websocket_url=config.tradernet_websocket_url,
+                snapshot_base_url=config.tradernet_snapshot_base_url,
+                sid=config.tradernet_sid,
+                user_id=config.tradernet_user_id,
+                api_key=config.tradernet_api_key,
+                api_secret=config.tradernet_api_secret,
+                require_authenticated_sid=config.tradernet_require_authenticated_sid,
+                snapshot_fallback=config.tradernet_snapshot_fallback,
+                connect_timeout_seconds=config.tradernet_connect_timeout_seconds,
+                snapshot_timeout_seconds=config.tradernet_snapshot_timeout_seconds,
+            )
+        )
+    raise ValueError(f"Unsupported market-data provider: {config.provider}")
+
+
+def build_collector(
+    redis: Redis,
+    config: Settings,
+    metrics: GatewayMetrics | None = None,
+) -> CollectorService:
+    return CollectorService(
+        build_provider(config),
+        RedisStore(redis, config),
+        config,
+        metrics or GatewayMetrics(),
+    )
+
+
 def build_mock_collector(
     redis: Redis,
     config: Settings,
     metrics: GatewayMetrics | None = None,
 ) -> CollectorService:
-    provider = MockMarketDataProvider(
-        MockProviderConfig(
-            interval_seconds=config.mock_interval_seconds,
-            duplicate_every=config.mock_duplicate_every,
-            fail_after_events=config.mock_fail_after_events,
-        )
-    )
-    return CollectorService(
-        provider,
-        RedisStore(redis, config),
-        config,
-        metrics or GatewayMetrics(),
-    )
+    mock_config = config.model_copy(update={"provider": "mock"})
+    return build_collector(redis, mock_config, metrics)
 
 
 async def _run() -> None:
@@ -205,7 +249,7 @@ async def _run() -> None:
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
     metrics = GatewayMetrics()
     start_http_server(settings.collector_metrics_port, registry=metrics.registry)
-    collector = build_mock_collector(redis, settings, metrics)
+    collector = build_collector(redis, settings, metrics)
     try:
         await collector.run()
     finally:
