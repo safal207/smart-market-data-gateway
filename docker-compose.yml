@@ -65,7 +65,14 @@ services:
 
   migrate:
     build: .
-    command: ["smdg-migrate", "--migrations-dir", "/app/migrations"]
+    command:
+      [
+        "python",
+        "-m",
+        "smart_market_data_gateway.migrations",
+        "--migrations-dir",
+        "/app/migrations",
+      ]
     environment:
       <<: *gateway-environment
     depends_on:
