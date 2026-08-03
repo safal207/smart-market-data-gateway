@@ -108,7 +108,7 @@ The attestation must identify Tradernet, match the target URL, be timezone-aware
 | Profile | Purpose |
 |---|---|
 | `reconnect-storm` | Simultaneous disconnect and reconnect behaviour |
-| `frozen-stream` | Credit recovery only when a quote carries a gateway `received_at` later than the resume cutoff; queued backlog cannot pass |
+| `frozen-stream` | Discard backlog until a matching gateway pong on the same ordered WebSocket, then require the first later quote; no cross-host clock comparison |
 | `zombie-cleanup` | Abrupt client loss and subscription cleanup |
 
 ## Unresolved release gates
