@@ -127,6 +127,54 @@ def test_late_event_does_not_mutate_finalized_candle() -> None:
     assert late.finalized == ()
 
 
+def test_empty_bucket_behind_watermark_is_rejected_as_late() -> None:
+    start = datetime(2026, 8, 1, 12, 0, 0, tzinfo=UTC)
+    builder = CandleBuilder((10,), allowed_lateness_seconds=0)
+
+    builder.add(accepted_event(event_id=1, timestamp=start, price="100", sequence=1))
+    builder.add(
+        accepted_event(
+            event_id=2,
+            timestamp=start + timedelta(seconds=100),
+            price="200",
+            sequence=2,
+        )
+    )
+    late = builder.add(
+        accepted_event(
+            event_id=3,
+            timestamp=start + timedelta(seconds=50),
+            price="999",
+            sequence=3,
+        )
+    )
+
+    assert late.late_intervals == (10,)
+    remaining = builder.flush()
+    assert all(candle.bucket_start != start + timedelta(seconds=50) for candle in remaining)
+
+
+def test_symbol_checkpoint_does_not_scan_unrelated_finalized_symbols() -> None:
+    start = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
+    builder = CandleBuilder((1, 10, 60), allowed_lateness_seconds=0)
+
+    class NoItemsDict(dict[tuple[str, int], datetime]):
+        def items(self):
+            raise AssertionError("checkpoint_symbol must not scan all finalized symbols")
+
+    builder._finalized_through = NoItemsDict(
+        {
+            ("AAPL", 1): start,
+            ("MSFT", 1): start,
+            ("NVDA", 60): start,
+        }
+    )
+
+    checkpoint = builder.checkpoint_symbol("AAPL")
+
+    assert checkpoint.finalized_through == {1: start}
+
+
 def test_symbol_checkpoint_restores_only_failed_symbol() -> None:
     start = datetime(2026, 8, 1, 12, 0, tzinfo=UTC)
     builder = CandleBuilder((60,), allowed_lateness_seconds=0)
