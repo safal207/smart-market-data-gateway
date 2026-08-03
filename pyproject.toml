@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "smart-market-data-gateway"
-version = "0.3.0"
-description = "Adaptive market-data gateway with accepted-event history and deterministic candles"
+version = "0.2.0"
+description = "Adaptive market-data gateway with smart subscription aggregation and tier-based QoS"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
@@ -25,6 +25,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "build>=1.2,<2.0",
   "detect-secrets>=1.5,<2.0",
   "mypy>=1.13,<2.0",
   "pip-audit>=2.7,<3.0",
@@ -39,11 +40,7 @@ dev = [
 [project.scripts]
 smdg-benchmark = "smart_market_data_gateway.benchmark:main"
 smdg-collector = "smart_market_data_gateway.collector:main"
-smdg-history-sink = "smart_market_data_gateway.history:main"
-smdg-migrate = "smart_market_data_gateway.migrations:main"
-smdg-replay = "smart_market_data_gateway.replay:main"
 smdg-usage-sink = "smart_market_data_gateway.usage_sink:main"
-smdg-verify-history = "smart_market_data_gateway.integrity:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/smart_market_data_gateway"]
