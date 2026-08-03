@@ -2,7 +2,7 @@
 
 Adaptive market-data gateway that reduces duplicated work before adding infrastructure. It aggregates identical subscriptions, applies tier-based Quality of Service, protects healthy clients from slow consumers, and exposes one REST/WebSocket contract for web, mobile, and external API clients.
 
-The repository now also contains the trusted-data foundation for a future **Temporal Market Intelligence Graph**: an accepted-event stream, point-in-time quality metadata, deterministic server-side candles, TimescaleDB history, deterministic replay, and a tamper-evident accepted-event integrity chain. It does not yet claim predictive alpha or expose trading recommendations.
+The repository also contains the trusted-data foundation for a future **Temporal Market Intelligence Graph**: a real or mock provider adapter, accepted/rejected event boundaries, point-in-time quality metadata, durable PostgreSQL/TimescaleDB history, deterministic server-side candles, deterministic replay, and a tamper-evident accepted-event integrity chain. It does not claim predictive alpha or expose trading recommendations.
 
 ## Architecture
 
@@ -18,7 +18,7 @@ Web / Mobile / API clients
   └─ Prometheus metrics + JSON logs
           │ global first/last subscription transitions
           ▼
- Redis control stream ──► Collector ──► Market-data provider
+ Redis control stream ──► Collector ──► Mock or Tradernet/Freedom provider
                                   │ normalized QuoteEvent v1
                                   ▼
                          Redis raw quote stream
@@ -34,7 +34,7 @@ Web / Mobile / API clients
                           ▼
                     History worker
                           │
-                          ├────────► TimescaleDB quote history
+                          ├────────► PostgreSQL/TimescaleDB history
                           ├────────► append-only integrity chain
                           ├────────► finalized server candles
                           └────────► late-event audit
@@ -47,13 +47,14 @@ REST / WebSocket usage events
 
 Redis Streams provide durable, acknowledged processing. Redis Pub/Sub broadcasts processed quotes to gateway instances that own local WebSocket sessions. Reconnecting clients receive the latest cached snapshot before live updates.
 
-History, candle construction, replay, future graph features, and future ML are outside the quote-delivery hot path.
+History, candle construction, replay, future graph features, and future ML remain outside the quote-delivery hot path.
 
 ## Implemented capabilities
 
-### Gateway
+### Gateway and providers
 
-- vendor-neutral provider adapter and deterministic mock provider;
+- vendor-neutral provider contract, deterministic mock provider, and read-only Tradernet/Freedom adapter;
+- Tradernet public/demo and authenticated SID modes, strict demo-fallback rejection, HTTP snapshot fallback, credential redaction, and an explicit API-key signing gate;
 - provider reconnect with capped exponential backoff, jitter, restored symbols, outage metrics, and alerts;
 - Redis Streams, consumer groups, stale-entry reclaim, bounded retries, dead-letter stream, and deduplication;
 - sequence gap and out-of-order detection with degraded-stream metadata;
@@ -66,19 +67,18 @@ History, candle construction, replay, future graph features, and future ML are o
 - distributed token-bucket burst and sustained limits;
 - bounded latest-value backpressure and slow-consumer warnings;
 - structured JSON logs with correlation IDs and sensitive-value redaction;
-- Prometheus metrics, Grafana dashboard, and alert rules;
+- Prometheus metrics, provider metrics, Grafana dashboard, and alert rules;
 - asynchronous idempotent usage capture and durable PostgreSQL audit records;
-- deterministic before/after routing benchmark with payload-byte accounting;
-- deployed WebSocket load runner with P50/P95/P99 latency, throughput, errors, and network bytes;
-- OpenAPI, AsyncAPI, public v1 compatibility manifest, C4 diagrams, ADRs, tests, and CI.
+- deterministic routing benchmark, deployed WebSocket load runner, provider integration checks, and resilience profiles;
+- OpenAPI, AsyncAPI, public v1 compatibility manifest, C4 diagrams, ADRs, licensing gate, tests, and CI.
 
-### Temporal data foundation
+### Trusted temporal data
 
 - separate accepted and rejected quote streams;
 - immutable `AcceptedQuoteEvent` envelope with `accepted_at`, `data_cutoff`, and quality metadata;
 - stale and out-of-order events excluded from latest cache and accepted history;
 - gap events accepted with degraded quality and explicit audit metadata;
-- TimescaleDB-compatible `quote_events`, `candles`, and `late_quote_events` hypertables;
+- PostgreSQL/TimescaleDB-compatible `quote_events`, `candles`, and `late_quote_events` tables;
 - canonical SHA-256 digest for every accepted-event payload;
 - append-only previous-hash integrity chain committed with each quote in one transaction;
 - independent chain verifier that detects payload changes, gaps, broken links, and head mismatch;
@@ -105,13 +105,14 @@ Services:
 |---|---|
 | REST/OpenAPI | `http://localhost:8000/docs` |
 | WebSocket | `ws://localhost:8000/v1/stream` |
-| Collector | mock provider + control/raw quote streams |
-| History writer | accepted stream → TimescaleDB + candles |
+| Collector | selected provider + control/raw quote streams |
+| Migration runner | ordered temporal schema migrations |
+| History writer | accepted stream → history, integrity, candles, late-event audit |
 | Usage writer | Redis usage stream → PostgreSQL |
 | Prometheus | `http://localhost:9090` |
 | Grafana | `http://localhost:3000` (`admin` / `admin`) |
 | Redis | `localhost:6379` |
-| TimescaleDB | `localhost:5432` |
+| TimescaleDB/PostgreSQL | `localhost:5432` |
 
 Development tokens are enabled only for local configuration:
 
@@ -139,6 +140,39 @@ WebSocket command:
   "request_id": "demo-1"
 }
 ```
+
+## Tradernet / Freedom quote provider
+
+Public/demo mode:
+
+```env
+SMDG_PROVIDER=tradernet
+SMDG_TRADERNET_MODE=public_demo
+SMDG_TRADERNET_WEBSOCKET_URL=wss://wss.tradernet.com/
+SMDG_TRADERNET_INTEGRATION_SYMBOLS=AAPL.US,MSFT.US
+```
+
+Authenticated SID integration test:
+
+```env
+SMDG_PROVIDER=tradernet
+SMDG_TRADERNET_MODE=sid_session
+SMDG_TRADERNET_SID=<secret>
+SMDG_TRADERNET_USER_ID=<optional-user-id>
+```
+
+The adapter replaces the complete quote watch list, normalizes decimal commas, derives deterministic event IDs, rejects SID sessions that silently fall back to demo mode, and preserves the literal `+` separator required by the snapshot endpoint. API-key mode remains disabled until the current HMAC canonical-string contract is verified from authoritative documentation.
+
+Run the opt-in provider check:
+
+```bash
+python scripts/tradernet_integration.py \
+  --symbols AAPL.US,MSFT.US \
+  --events 20 \
+  --timeout 30
+```
+
+The generated report excludes SID, user ID, API key, API secret, and raw credential-bearing errors.
 
 ## Replay
 
@@ -168,13 +202,13 @@ Use a dedicated replay stream unless duplicate live downstream processing is int
 
 ## History integrity
 
-Verify the accepted-event payload digests, sequence, previous-hash links, and persisted chain head before replay or feature generation:
+Verify accepted-event payload digests, sequence, previous-hash links, and the persisted chain head before replay or feature generation:
 
 ```bash
 python -m smart_market_data_gateway.integrity
 ```
 
-A successful result is emitted as JSON. Any changed payload, missing record, sequence gap, broken link, profile mismatch, or incorrect head exits non-zero. This mechanism is tamper-evident; externally signed checkpoints are still required to resist a database administrator who can rewrite the complete chain.
+Any changed payload, missing record, sequence gap, broken link, profile mismatch, or incorrect head exits non-zero. This mechanism is tamper-evident; externally signed checkpoints are still required to resist an administrator able to rewrite the complete database chain.
 
 ## Development
 
@@ -190,7 +224,7 @@ python scripts/check_contract_compatibility.py
 docker compose config
 ```
 
-Integration tests use Redis database 15 and PostgreSQL/TimescaleDB when `TEST_REDIS_URL` and `TEST_DATABASE_URL` are set.
+Integration tests use Redis database 15 and PostgreSQL/TimescaleDB when `TEST_REDIS_URL` and `TEST_DATABASE_URL` are set. Tradernet network tests are opt-in and require explicit environment configuration.
 
 ## Benchmarks
 
@@ -216,7 +250,17 @@ python benchmarks/ws_load.py \
   --messages 20
 ```
 
-The CI smoke benchmark uploads raw JSON and Markdown artifacts. No simulated result is presented as a production fact. A real-provider benchmark will be performed only after selecting a provider, confirming its caching, redistribution, non-display, historical-storage, and benchmark rights, and recording the exact environment and commit SHA.
+Provider profile example:
+
+```bash
+python benchmarks/run_tradernet_profile.py \
+  --profile smoke \
+  --symbols AAPL.US,MSFT.US,NVDA.US,TSLA.US,AMZN.US \
+  --commit-sha "$(git rev-parse HEAD)" \
+  --market-session open
+```
+
+`legacy-673` and SID-backed report generation require explicit `--licensing-approved`. Synthetic, deployed-gateway, and provider-backed measurements are reported separately. No simulated measurement is presented as a production fact.
 
 ## Documentation
 
@@ -226,6 +270,9 @@ The CI smoke benchmark uploads raw JSON and Markdown artifacts. No simulated res
 - [Prediction outcome ledger](docs/PREDICTION_LEDGER.md)
 - [Evaluation protocol](docs/EVALUATION_PROTOCOL.md)
 - [Explainable Signal API](docs/SIGNAL_API.md)
+- [Tradernet/Freedom adapter](docs/providers/tradernet.md)
+- [Provider implementation status](docs/provider-implementation-status.md)
+- [Provider licensing checklist](docs/provider-licensing-checklist.md)
 - [Product backlog](docs/backlog.md)
 - [Implementation plan](docs/implementation-plan.md)
 - [C4 System Context](docs/architecture/context.md)
@@ -235,8 +282,7 @@ The CI smoke benchmark uploads raw JSON and Markdown artifacts. No simulated res
 - [WebSocket AsyncAPI](docs/asyncapi.yaml)
 - [Public API compatibility manifest](contracts/public-api-v1.json)
 - [Benchmark methodology](docs/benchmark-methodology.md)
-- [Provider licensing checklist](docs/provider-licensing-checklist.md)
 
 ## Licensing warning
 
-Commercial redistribution, caching, non-display use, historical storage, and public benchmark publication depend on provider and exchange terms. The real-provider adapter remains a separate gated step; no commercial redistribution is enabled by this repository alone.
+A technically working provider adapter does not grant permission to cache, redistribute, sell, retain historically, or publish market data. Commercial redistribution, non-display use, historical storage, and public provider-backed benchmark publication remain blocked until the applicable provider and exchange terms are reviewed and approved.
