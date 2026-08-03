@@ -204,7 +204,7 @@ python benchmarks/run_tradernet_profile.py \
   --market-session open
 ```
 
-Available profiles include `smoke`, `medium-100`, `medium-500`, `load-1000`, `load-10000`, and `legacy-673`. The `legacy-673` profile refuses to run unless a file containing at least 673 real symbols is supplied through `--symbols-file`.
+Available profiles include `smoke`, `medium-100`, `medium-500`, `load-1000`, `load-10000`, and `legacy-673`. The `legacy-673` profile requires explicit `--licensing-approved` and a `--symbols-file` containing at least 673 real provider symbols.
 
 Resilience scenarios:
 
