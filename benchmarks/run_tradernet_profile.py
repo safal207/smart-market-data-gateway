@@ -33,7 +33,16 @@ def load_symbols(args: argparse.Namespace) -> list[str]:
     return symbols
 
 
+def require_publication_approval(args: argparse.Namespace) -> None:
+    restricted = args.data_mode == "sid" or args.profile == "legacy-673"
+    if restricted and not args.licensing_approved:
+        raise PermissionError(
+            "SID-backed and legacy-673 provider reports require explicit licensing approval"
+        )
+
+
 async def run(args: argparse.Namespace) -> dict[str, Any]:
+    require_publication_approval(args)
     profiles = load_profiles(args.profiles)
     if args.profile not in profiles:
         raise ValueError(
