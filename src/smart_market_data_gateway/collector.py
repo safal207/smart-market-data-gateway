@@ -198,8 +198,12 @@ def build_provider(config: Settings) -> MarketDataProvider:
             mode = TradernetMode(config.tradernet_mode)
         except ValueError as exc:
             raise ValueError(
-                "SMDG_TRADERNET_MODE must be public_demo, sid_session, or api_key"
+                "SMDG_TRADERNET_MODE must be public_demo or sid_session"
             ) from exc
+        if mode is TradernetMode.API_KEY:
+            raise ValueError(
+                "SMDG_TRADERNET_MODE=api_key is disabled until the Tradernet HMAC contract is verified"
+            )
         return TradernetProviderAdapter(
             TradernetProviderConfig(
                 mode=mode,
