@@ -127,6 +127,13 @@ class CandleBuilder:
         late_intervals: list[int] = []
         for interval in self.intervals_seconds:
             bucket_start = _bucket_start(event.provider_timestamp, interval)
+            bucket_end = bucket_start + timedelta(seconds=interval)
+            if (
+                previous_watermark is not None
+                and bucket_end + self.allowed_lateness <= previous_watermark
+            ):
+                late_intervals.append(interval)
+                continue
             finalized_through = self._finalized_through.get((event.symbol, interval))
             if finalized_through is not None and bucket_start <= finalized_through:
                 late_intervals.append(interval)
@@ -148,11 +155,11 @@ class CandleBuilder:
     def checkpoint_symbol(self, symbol: str) -> CandleSymbolCheckpoint:
         keys = self._keys_by_symbol.get(symbol, set())
         active = {key: deepcopy(self._active[key]) for key in keys}
-        finalized_through = {
-            interval: value
-            for (candidate_symbol, interval), value in self._finalized_through.items()
-            if candidate_symbol == symbol
-        }
+        finalized_through: dict[int, datetime] = {}
+        for interval in self.intervals_seconds:
+            value = self._finalized_through.get((symbol, interval))
+            if value is not None:
+                finalized_through[interval] = value
         return CandleSymbolCheckpoint(
             symbol=symbol,
             active=active,
