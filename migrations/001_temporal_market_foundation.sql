@@ -39,13 +39,8 @@ CREATE INDEX IF NOT EXISTS quote_events_symbol_time_idx
     ON quote_events (symbol, provider_timestamp DESC);
 CREATE INDEX IF NOT EXISTS quote_events_provider_time_idx
     ON quote_events (provider, provider_timestamp DESC);
-CREATE INDEX IF NOT EXISTS quote_events_replay_order_idx
-    ON quote_events (
-        source_stream_ms NULLS LAST,
-        source_stream_sequence NULLS LAST,
-        accepted_at,
-        event_id
-    );
+-- Replay-order columns and their index are applied in migration 002 so prototype
+-- databases that already have quote_events can be upgraded before index creation.
 
 CREATE TABLE IF NOT EXISTS accepted_event_integrity (
     chain_name TEXT NOT NULL,
