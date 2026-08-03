@@ -1,7 +1,11 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from smart_market_data_gateway.domain import QuoteEvent
+from smart_market_data_gateway.domain import (
+    AcceptedQuoteEvent,
+    DataQualityMetadata,
+    QuoteEvent,
+)
 from smart_market_data_gateway.storage import RedisStore
 
 
@@ -14,6 +18,20 @@ def quote(symbol: str = "AAPL", sequence: int = 1) -> QuoteEvent:
         provider_timestamp=datetime.now(UTC),
         sequence=sequence,
         provider="test-provider",
+    )
+
+
+def accepted(sequence: int = 1) -> AcceptedQuoteEvent:
+    event = quote(sequence=sequence)
+    return AcceptedQuoteEvent(
+        event=event,
+        quality=DataQualityMetadata(
+            score=1.0,
+            source_provider=event.provider,
+            accepted_at=event.received_at,
+        ),
+        data_cutoff=event.provider_timestamp,
+        source_stream_id=f"{sequence}-0",
     )
 
 
@@ -54,6 +72,31 @@ async def test_stale_snapshot_and_many(redis_client, test_settings) -> None:
     assert result["AAPL"] is not None
     assert result["AAPL"].stale is True
     assert result["UNKNOWN"] is None
+
+
+async def test_accepted_stream_does_not_trim_unacknowledged_events(
+    redis_client,
+    test_settings,
+) -> None:
+    durable_settings = test_settings.model_copy(update={"accepted_stream_maxlen": 1})
+    store = RedisStore(redis_client, durable_settings)
+
+    first_id = await store.publish_accepted_event(accepted(sequence=1))
+    second_id = await store.publish_accepted_event(accepted(sequence=2))
+
+    entries = await redis_client.xrange(durable_settings.accepted_event_stream)
+    assert [entry_id for entry_id, _fields in entries] == [first_id, second_id]
+
+
+def test_normalize_entries_skips_deleted_stream_payloads() -> None:
+    messages = RedisStore._normalize_entries(
+        [
+            (None, None),
+            ("1-0", {"payload": "kept"}),
+        ]
+    )
+
+    assert messages == [("1-0", {"payload": "kept"})]
 
 
 async def test_stream_retry_dlq_rate_limit_and_usage(redis_client, test_settings) -> None:
