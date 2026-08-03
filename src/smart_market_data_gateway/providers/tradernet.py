@@ -70,12 +70,10 @@ WebSocketFactory = Callable[..., Awaitable[_WebSocketConnection]]
 
 
 class TradernetProviderAdapter(MarketDataProvider):
-    """Tradernet/Freedom quote adapter using the documented JSON WebSocket protocol.
+    """Read-only Tradernet/Freedom quote adapter.
 
-    The provider sends and receives ``[event, data]`` frames. Quote subscriptions are
-    replaced atomically by sending ``["quotes", [symbols...]]`` and updates arrive as
-    the ``q`` event. SID mode is read-only here; order and portfolio methods are not
-    implemented by this market-data adapter.
+    Strict SID sessions are fail-closed: quote frames and snapshot fallback are withheld
+    until an explicit non-demo ``userData`` frame confirms the authenticated session.
     """
 
     def __init__(
@@ -86,13 +84,16 @@ class TradernetProviderAdapter(MarketDataProvider):
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         self.config = config
-        self._websocket_factory = websocket_factory or cast(WebSocketFactory, websockets.connect)
+        self._websocket_factory = websocket_factory or cast(
+            WebSocketFactory, websockets.connect
+        )
         self._http_client = http_client
         self._websocket: _WebSocketConnection | None = None
         self._state = ProviderState.DISCONNECTED
         self._message: str | None = None
         self._active_symbols: set[str] = set()
         self._session_info: dict[str, Any] = {}
+        self._session_confirmed = not self._requires_session_confirmation()
 
     @property
     def name(self) -> str:
@@ -106,6 +107,10 @@ class TradernetProviderAdapter(MarketDataProvider):
     def session_info(self) -> Mapping[str, Any]:
         return dict(self._session_info)
 
+    @property
+    def session_confirmed(self) -> bool:
+        return self._session_confirmed
+
     async def connect(self) -> None:
         if self.config.mode is TradernetMode.API_KEY:
             raise NotImplementedError(
@@ -118,6 +123,8 @@ class TradernetProviderAdapter(MarketDataProvider):
         await self.disconnect()
         self._state = ProviderState.CONNECTING
         self._message = None
+        self._session_info = {}
+        self._session_confirmed = not self._requires_session_confirmation()
         try:
             self._websocket = await self._websocket_factory(
                 self._connection_url(),
@@ -132,7 +139,7 @@ class TradernetProviderAdapter(MarketDataProvider):
                 await self._send_subscription()
         except Exception as exc:
             safe_message = self._redact(str(exc))
-            self._state = ProviderState.DISCONNECTED
+            await self.disconnect()
             self._message = safe_message
             raise TradernetError(f"Tradernet connection failed: {safe_message}") from exc
 
@@ -140,6 +147,7 @@ class TradernetProviderAdapter(MarketDataProvider):
         websocket = self._websocket
         self._websocket = None
         self._state = ProviderState.DISCONNECTED
+        self._session_confirmed = not self._requires_session_confirmation()
         if websocket is not None:
             try:
                 await websocket.close()
@@ -171,7 +179,12 @@ class TradernetProviderAdapter(MarketDataProvider):
                 safe_message = self._redact(str(exc))
                 self._state = ProviderState.DEGRADED
                 self._message = f"websocket receive failed: {safe_message}"
-                if self.config.snapshot_fallback and self._active_symbols:
+                can_use_snapshot = (
+                    self.config.snapshot_fallback
+                    and bool(self._active_symbols)
+                    and self._session_confirmed
+                )
+                if can_use_snapshot:
                     try:
                         for snapshot in await self.fetch_snapshots(self._active_symbols):
                             yield snapshot
@@ -223,6 +236,12 @@ class TradernetProviderAdapter(MarketDataProvider):
                 extra={"event": "tradernet_unknown_event", "provider_event": event_name},
             )
             return []
+        if self._requires_session_confirmation() and not self._session_confirmed:
+            logger.warning(
+                "Withholding Tradernet quote before authenticated SID confirmation",
+                extra={"event": "tradernet_quote_before_sid_confirmation"},
+            )
+            return []
 
         rows = self._quote_rows(payload)
         normalized: list[QuoteEvent] = []
@@ -233,6 +252,10 @@ class TradernetProviderAdapter(MarketDataProvider):
         return normalized
 
     async def fetch_snapshots(self, symbols: Collection[str]) -> list[QuoteEvent]:
+        if self._requires_session_confirmation() and not self._session_confirmed:
+            raise TradernetAuthenticationError(
+                "SID session must be confirmed before snapshot fallback"
+            )
         normalized = self._normalize_symbols(symbols)
         if not normalized:
             return []
@@ -246,7 +269,9 @@ class TradernetProviderAdapter(MarketDataProvider):
             response.raise_for_status()
             payload = response.json()
         except (httpx.HTTPError, ValueError) as exc:
-            raise TradernetAPIError(f"Tradernet snapshot request failed: {self._redact(str(exc))}") from exc
+            raise TradernetAPIError(
+                f"Tradernet snapshot request failed: {self._redact(str(exc))}"
+            ) from exc
         finally:
             if owns_client:
                 await client.aclose()
@@ -262,15 +287,23 @@ class TradernetProviderAdapter(MarketDataProvider):
     def _connection_url(self) -> str:
         split = urlsplit(self.config.websocket_url)
         query = dict(parse_qsl(split.query, keep_blank_values=True))
-        if self.config.sid:
-            query["SID"] = self.config.sid
-        if self.config.user_id:
-            query["user_id"] = self.config.user_id
-        return urlunsplit((split.scheme, split.netloc, split.path or "/", urlencode(query), split.fragment))
+        if self.config.mode is TradernetMode.SID_SESSION:
+            if self.config.sid:
+                query["SID"] = self.config.sid
+            if self.config.user_id:
+                query["user_id"] = self.config.user_id
+        else:
+            query.pop("SID", None)
+            query.pop("user_id", None)
+        return urlunsplit(
+            (split.scheme, split.netloc, split.path or "/", urlencode(query), split.fragment)
+        )
 
     def _snapshot_url(self, symbols: Collection[str]) -> str:
         encoded = "+".join(quote(symbol, safe="./:_-") for symbol in sorted(symbols))
-        return f"{self.config.snapshot_base_url.rstrip('/')}/securities/export?tickers={encoded}"
+        return (
+            f"{self.config.snapshot_base_url.rstrip('/')}/securities/export?tickers={encoded}"
+        )
 
     async def _send_subscription(self) -> None:
         websocket = self._websocket
@@ -282,15 +315,29 @@ class TradernetProviderAdapter(MarketDataProvider):
         if not isinstance(payload, dict):
             return
         self._session_info = dict(payload)
-        is_demo = bool(payload.get("isDemo")) or str(payload.get("mode", "")).lower() == "demo"
-        if (
-            self.config.mode is TradernetMode.SID_SESSION
-            and self.config.require_authenticated_sid
-            and is_demo
-        ):
+        mode = str(payload.get("mode", "")).strip().lower()
+        is_demo_value = payload.get("isDemo")
+        is_demo = is_demo_value is True or mode == "demo"
+        if self._requires_session_confirmation() and is_demo:
             self._state = ProviderState.DEGRADED
             self._message = "SID was rejected or expired; Tradernet returned demo mode"
             raise TradernetAuthenticationError(self._message)
+        if self._requires_session_confirmation():
+            explicitly_authenticated = is_demo_value is False or mode in {
+                "authenticated",
+                "live",
+                "real",
+            }
+            if explicitly_authenticated:
+                self._session_confirmed = True
+        else:
+            self._session_confirmed = True
+
+    def _requires_session_confirmation(self) -> bool:
+        return (
+            self.config.mode is TradernetMode.SID_SESSION
+            and self.config.require_authenticated_sid
+        )
 
     def _redact(self, value: str) -> str:
         redacted = value
@@ -326,7 +373,9 @@ class TradernetProviderAdapter(MarketDataProvider):
         code = payload.get("code")
         error = payload.get("error") or payload.get("errMsg")
         if code not in {None, 0, "0", "ok", "OK"} or error:
-            raise TradernetAPIError(f"Tradernet API error code={code!r}: {error or 'unknown error'}")
+            raise TradernetAPIError(
+                f"Tradernet API error code={code!r}: {error or 'unknown error'}"
+            )
 
     @classmethod
     def _extract_snapshot_rows(cls, payload: Any) -> Iterable[Mapping[str, Any]]:
