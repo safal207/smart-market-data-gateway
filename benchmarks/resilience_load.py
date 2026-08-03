@@ -12,24 +12,12 @@ from typing import Any
 import httpx
 import websockets
 
+from smart_market_data_gateway.resilience_evidence import quote_was_received_after
+
 
 def websocket_url(base: str, token: str) -> str:
     separator = "&" if "?" in base else "?"
     return f"{base}{separator}token={token}"
-
-
-def parse_utc_timestamp(value: Any) -> datetime:
-    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise ValueError("quote timestamp must be timezone-aware")
-    return parsed.astimezone(UTC)
-
-
-def quote_was_received_after(quote: dict[str, Any], cutoff: datetime) -> bool:
-    received_at = quote.get("received_at")
-    if received_at is None:
-        return False
-    return parse_utc_timestamp(received_at) > cutoff
 
 
 async def connect_and_subscribe(
@@ -83,7 +71,10 @@ async def receive_quote_after(
 
 
 async def close_sockets(sockets: list[Any]) -> None:
-    await asyncio.gather(*(socket.close() for socket in sockets), return_exceptions=True)
+    await asyncio.gather(
+        *(socket.close() for socket in sockets),
+        return_exceptions=True,
+    )
 
 
 async def fetch_stats(url: str) -> dict[str, Any]:
@@ -93,7 +84,10 @@ async def fetch_stats(url: str) -> dict[str, Any]:
         return dict(response.json())
 
 
-async def reconnect_storm(args: argparse.Namespace, assignments: list[list[str]]) -> dict[str, Any]:
+async def reconnect_storm(
+    args: argparse.Namespace,
+    assignments: list[list[str]],
+) -> dict[str, Any]:
     initial = await asyncio.gather(
         *(
             connect_and_subscribe(index, url=args.url, symbols=symbols)
@@ -101,8 +95,12 @@ async def reconnect_storm(args: argparse.Namespace, assignments: list[list[str]]
         ),
         return_exceptions=True,
     )
-    initial_sockets = [socket for socket in initial if not isinstance(socket, Exception)]
-    initial_errors = [str(error) for error in initial if isinstance(error, Exception)]
+    initial_sockets = [
+        socket for socket in initial if not isinstance(socket, Exception)
+    ]
+    initial_errors = [
+        str(error) for error in initial if isinstance(error, Exception)
+    ]
     await close_sockets(initial_sockets)
 
     started = time.perf_counter()
@@ -114,8 +112,12 @@ async def reconnect_storm(args: argparse.Namespace, assignments: list[list[str]]
         return_exceptions=True,
     )
     elapsed = time.perf_counter() - started
-    reconnected_sockets = [socket for socket in reconnected if not isinstance(socket, Exception)]
-    reconnect_errors = [str(error) for error in reconnected if isinstance(error, Exception)]
+    reconnected_sockets = [
+        socket for socket in reconnected if not isinstance(socket, Exception)
+    ]
+    reconnect_errors = [
+        str(error) for error in reconnected if isinstance(error, Exception)
+    ]
     quote_results = await asyncio.gather(
         *(receive_quote(socket, args.timeout) for socket in reconnected_sockets),
         return_exceptions=True,
@@ -129,12 +131,17 @@ async def reconnect_storm(args: argparse.Namespace, assignments: list[list[str]]
         "reconnected_clients": len(reconnected_sockets),
         "reconnect_errors": reconnect_errors[:100],
         "reconnect_wall_seconds": elapsed,
-        "reconnects_per_second": len(reconnected_sockets) / elapsed if elapsed else 0,
+        "reconnects_per_second": (
+            len(reconnected_sockets) / elapsed if elapsed else 0
+        ),
         "clients_receiving_after_reconnect": delivered,
     }
 
 
-async def zombie_cleanup(args: argparse.Namespace, assignments: list[list[str]]) -> dict[str, Any]:
+async def zombie_cleanup(
+    args: argparse.Namespace,
+    assignments: list[list[str]],
+) -> dict[str, Any]:
     connected = await asyncio.gather(
         *(
             connect_and_subscribe(index, url=args.url, symbols=symbols)
@@ -142,9 +149,13 @@ async def zombie_cleanup(args: argparse.Namespace, assignments: list[list[str]])
         ),
         return_exceptions=True,
     )
-    sockets = [socket for socket in connected if not isinstance(socket, Exception)]
+    sockets = [
+        socket for socket in connected if not isinstance(socket, Exception)
+    ]
     before = await fetch_stats(args.stats_url)
-    abrupt_count = max(1, round(len(sockets) * args.zombie_fraction)) if sockets else 0
+    abrupt_count = (
+        max(1, round(len(sockets) * args.zombie_fraction)) if sockets else 0
+    )
     abrupt = sockets[:abrupt_count]
     graceful = sockets[abrupt_count:]
 
@@ -167,7 +178,10 @@ async def zombie_cleanup(args: argparse.Namespace, assignments: list[list[str]])
     }
 
 
-async def frozen_stream(args: argparse.Namespace, assignments: list[list[str]]) -> dict[str, Any]:
+async def frozen_stream(
+    args: argparse.Namespace,
+    assignments: list[list[str]],
+) -> dict[str, Any]:
     connected = await asyncio.gather(
         *(
             connect_and_subscribe(index, url=args.url, symbols=symbols)
@@ -175,12 +189,16 @@ async def frozen_stream(args: argparse.Namespace, assignments: list[list[str]]) 
         ),
         return_exceptions=True,
     )
-    sockets = [socket for socket in connected if not isinstance(socket, Exception)]
+    sockets = [
+        socket for socket in connected if not isinstance(socket, Exception)
+    ]
     first_results = await asyncio.gather(
         *(receive_quote(socket, args.timeout) for socket in sockets),
         return_exceptions=True,
     )
-    clients_with_initial_quote = sum(isinstance(result, dict) for result in first_results)
+    clients_with_initial_quote = sum(
+        isinstance(result, dict) for result in first_results
+    )
     await asyncio.sleep(args.pause_seconds)
 
     # Quotes already queued before this instant are backlog by definition. Recovery is
@@ -199,7 +217,9 @@ async def frozen_stream(args: argparse.Namespace, assignments: list[list[str]]) 
         return_exceptions=True,
     )
     recovered = sum(result is True for result in resumed)
-    errors = [str(result) for result in resumed if isinstance(result, Exception)]
+    errors = [
+        str(result) for result in resumed if isinstance(result, Exception)
+    ]
     await close_sockets(sockets)
 
     return {
@@ -215,7 +235,11 @@ async def frozen_stream(args: argparse.Namespace, assignments: list[list[str]]) 
 
 async def execute(args: argparse.Namespace) -> dict[str, Any]:
     rng = random.Random(args.seed)
-    universe = [symbol.strip().upper() for symbol in args.symbols.split(",") if symbol.strip()]
+    universe = [
+        symbol.strip().upper()
+        for symbol in args.symbols.split(",")
+        if symbol.strip()
+    ]
     if not universe:
         raise ValueError("at least one symbol is required")
     assignments = [
@@ -241,26 +265,36 @@ async def execute(args: argparse.Namespace) -> dict[str, Any]:
         },
         "results": results,
         "limitations": [
-            "Run against an isolated environment; resilience tests intentionally disconnect clients.",
-            "Provider-backed publication remains gated by Tradernet and exchange licensing terms.",
+            "Run against an isolated environment; resilience tests intentionally "
+            "disconnect clients.",
+            "Provider-backed publication remains gated by Tradernet and exchange "
+            "licensing terms.",
         ],
     }
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Gateway resilience benchmark scenarios")
+    parser = argparse.ArgumentParser(
+        description="Gateway resilience benchmark scenarios"
+    )
     parser.add_argument(
         "--scenario",
         choices=["reconnect-storm", "zombie-cleanup", "frozen-stream"],
         required=True,
     )
     parser.add_argument("--url", default="ws://localhost:8000/v1/stream")
-    parser.add_argument("--stats-url", default="http://localhost:8000/internal/stats")
+    parser.add_argument(
+        "--stats-url",
+        default="http://localhost:8000/internal/stats",
+    )
     parser.add_argument("--clients", type=int, default=50)
     parser.add_argument("--symbols-per-client", type=int, default=5)
     parser.add_argument(
         "--symbols",
-        default="AAPL.US,MSFT.US,NVDA.US,TSLA.US,AMZN.US,GOOG.US,META.US,AMD.US,INTC.US,ORCL.US",
+        default=(
+            "AAPL.US,MSFT.US,NVDA.US,TSLA.US,AMZN.US,"
+            "GOOG.US,META.US,AMD.US,INTC.US,ORCL.US"
+        ),
     )
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--pause-seconds", type=float, default=10.0)
