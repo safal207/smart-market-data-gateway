@@ -4,6 +4,8 @@ from typing import Any
 import httpx
 import pytest
 
+from smart_market_data_gateway.collector import build_provider
+from smart_market_data_gateway.config import Settings
 from smart_market_data_gateway.providers import (
     ProviderState,
     TradernetAPIError,
@@ -88,6 +90,13 @@ def test_malformed_and_unknown_frames_are_ignored() -> None:
     assert provider.parse_message(json.dumps(["portfolio", {}])) == []
 
 
+def test_shared_provider_factory_rejects_unverified_api_key_mode() -> None:
+    config = Settings(provider="tradernet", tradernet_mode="api_key")
+
+    with pytest.raises(ValueError, match="api_key is disabled"):
+        build_provider(config)
+
+
 async def test_subscription_is_replaced_and_restored_after_reconnect() -> None:
     first = FakeWebSocket()
     second = FakeWebSocket()
@@ -129,6 +138,29 @@ async def test_sid_expiry_is_detected_from_demo_user_data() -> None:
         provider.parse_message(json.dumps(["userData", {"isDemo": True, "mode": "demo"}]))
 
     assert (await provider.health()).state is ProviderState.DEGRADED
+
+
+async def test_sid_rejection_closes_live_socket_and_remains_degraded() -> None:
+    socket = FakeWebSocket(
+        [json.dumps(["userData", {"isDemo": True, "mode": "demo"}])]
+    )
+    provider = TradernetProviderAdapter(
+        TradernetProviderConfig(
+            mode=TradernetMode.SID_SESSION,
+            sid="expired-session",
+            require_authenticated_sid=True,
+        ),
+        websocket_factory=FakeWebSocketFactory([socket]),
+    )
+
+    await provider.connect()
+    with pytest.raises(TradernetAuthenticationError, match="rejected or expired"):
+        await anext(provider.events())
+
+    assert socket.closed is True
+    health = await provider.health()
+    assert health.state is ProviderState.DEGRADED
+    assert health.message is not None and "rejected or expired" in health.message
 
 
 async def test_public_demo_accepts_demo_user_data() -> None:
