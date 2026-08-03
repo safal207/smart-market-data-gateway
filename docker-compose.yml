@@ -14,8 +14,7 @@ services:
       start_period: 3s
 
   postgres:
-    image: timescale/timescaledb:latest-pg17@sha256:3e65c273cbf7218f2a28692492b4625b49f35c7d2142e945561ef52311a8c83a
-    command: ["postgres", "-c", "shared_preload_libraries=timescaledb"]
+    image: postgres:17-alpine
     environment:
       POSTGRES_DB: smdg
       POSTGRES_USER: smdg
@@ -39,10 +38,6 @@ services:
       SMDG_ALLOW_DEV_TOKENS: "true"
       SMDG_ALLOW_ANONYMOUS_DEV: "true"
       SMDG_LOG_LEVEL: INFO
-      SMDG_ACCEPTED_EVENT_MAX_AGE_SECONDS: "30"
-      SMDG_CANDLE_INTERVALS_SECONDS: 1,10,60,300
-      SMDG_CANDLE_ALLOWED_LATENESS_SECONDS: "2"
-      SMDG_ENABLE_HISTORY_RETENTION: "false"
     ports:
       - "8000:8000"
     depends_on:
@@ -62,23 +57,6 @@ services:
       timeout: 5s
       retries: 10
       start_period: 15s
-
-  migrate:
-    build: .
-    command:
-      [
-        "python",
-        "-m",
-        "smart_market_data_gateway.migrations",
-        "--migrations-dir",
-        "/app/migrations",
-      ]
-    environment:
-      <<: *gateway-environment
-    depends_on:
-      postgres:
-        condition: service_healthy
-    restart: "no"
 
   collector:
     build: .
@@ -106,18 +84,6 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-    restart: unless-stopped
-
-  history-writer:
-    build: .
-    command: ["python", "-m", "smart_market_data_gateway.history"]
-    environment:
-      <<: *gateway-environment
-    depends_on:
-      redis:
-        condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
     restart: unless-stopped
 
   usage-writer:
