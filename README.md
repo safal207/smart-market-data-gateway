@@ -194,17 +194,32 @@ python benchmarks/ws_load.py \
   --messages 20
 ```
 
-Run a staged Tradernet profile:
+Every staged Tradernet profile requires a fresh target-bound attestation. Example `provider-attestation.json`:
+
+```json
+{
+  "provider": "tradernet",
+  "data_mode": "demo",
+  "gateway_url": "ws://localhost:8000/v1/stream",
+  "deployment_commit_sha": "<deployed-sha>",
+  "environment": "isolated-test",
+  "issuer": "<responsible-operator>",
+  "issued_at": "2026-08-04T00:00:00Z",
+  "licensing_approved_for_publication": false
+}
+```
+
+Run a staged profile:
 
 ```bash
 python benchmarks/run_tradernet_profile.py \
   --profile smoke \
+  --attestation provider-attestation.json \
   --symbols AAPL.US,MSFT.US,NVDA.US,TSLA.US,AMZN.US \
-  --commit-sha "$(git rev-parse HEAD)" \
   --market-session open
 ```
 
-Available profiles include `smoke`, `medium-100`, `medium-500`, `load-1000`, `load-10000`, and `legacy-673`. The `legacy-673` profile requires explicit `--licensing-approved` and a `--symbols-file` containing at least 673 real provider symbols.
+Available profiles include `smoke`, `medium-100`, `medium-500`, `load-1000`, `load-10000`, and `legacy-673`. SID-backed and `legacy-673` reports require a fresh attestation with `licensing_approved_for_publication: true`; `legacy-673` also requires a `--symbols-file` containing at least 673 real provider symbols.
 
 Resilience scenarios:
 
@@ -214,7 +229,9 @@ python benchmarks/resilience_load.py --scenario zombie-cleanup --clients 100
 python benchmarks/resilience_load.py --scenario frozen-stream --clients 100
 ```
 
-The CI smoke benchmark uploads raw JSON and Markdown artifacts. Synthetic, deployed-gateway, and provider-backed measurements are reported separately. Provider-backed publication requires confirmed caching, redistribution, non-display, historical-storage, and benchmark rights plus the exact environment, market session, symbol set, and commit SHA.
+The frozen-stream scenario discards backlog until a matching gateway pong on each ordered WebSocket, then requires a later quote on that same stream. It does not compare clocks across hosts.
+
+The CI smoke benchmark uploads raw JSON and Markdown artifacts. Synthetic, deployed-gateway, and provider-backed measurements are reported separately. Provider-backed publication requires confirmed caching, redistribution, non-display, historical-storage, and benchmark rights plus target-bound provenance.
 
 ## Documentation
 
