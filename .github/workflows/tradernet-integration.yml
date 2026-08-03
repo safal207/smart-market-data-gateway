@@ -1,0 +1,90 @@
+name: Tradernet integration
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Tradernet adapter mode
+        required: true
+        type: choice
+        options:
+          - public_demo
+          - sid_session
+        default: public_demo
+      websocket_url:
+        description: WebSocket endpoint without credentials
+        required: true
+        default: wss://wss.tradernet.com/
+      symbols:
+        description: Comma-separated quote symbols
+        required: true
+        default: AAPL.US,MSFT.US
+      events:
+        description: Events to collect before and after reconnect
+        required: true
+        default: "20"
+      timeout_seconds:
+        description: Timeout for each collection phase
+        required: true
+        default: "30"
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SMDG_PROVIDER: tradernet
+      SMDG_TRADERNET_MODE: ${{ inputs.mode }}
+      SMDG_TRADERNET_WEBSOCKET_URL: ${{ inputs.websocket_url }}
+      SMDG_TRADERNET_INTEGRATION_SYMBOLS: ${{ inputs.symbols }}
+      SMDG_TRADERNET_REQUIRE_AUTHENTICATED_SID: "true"
+      SMDG_TRADERNET_SNAPSHOT_FALLBACK: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install project
+        run: pip install -e .
+
+      - name: Validate SID secret for authenticated mode
+        if: ${{ inputs.mode == 'sid_session' }}
+        env:
+          SMDG_TRADERNET_SID: ${{ secrets.TRADERNET_SID }}
+        run: |
+          if [ -z "$SMDG_TRADERNET_SID" ]; then
+            echo "TRADERNET_SID repository secret is required for sid_session mode" >&2
+            exit 1
+          fi
+
+      - name: Run quote and reconnect checks
+        env:
+          SMDG_TRADERNET_SID: ${{ secrets.TRADERNET_SID }}
+          SMDG_TRADERNET_USER_ID: ${{ secrets.TRADERNET_USER_ID }}
+          INPUT_SYMBOLS: ${{ inputs.symbols }}
+          INPUT_EVENTS: ${{ inputs.events }}
+          INPUT_TIMEOUT: ${{ inputs.timeout_seconds }}
+        run: >-
+          python scripts/tradernet_integration.py
+          --symbols "$INPUT_SYMBOLS"
+          --events "$INPUT_EVENTS"
+          --timeout "$INPUT_TIMEOUT"
+          --output benchmark-results/tradernet-integration.json
+
+      - name: Upload sanitized report
+        uses: actions/upload-artifact@v4
+        with:
+          name: tradernet-integration-${{ github.run_id }}
+          path: benchmark-results/tradernet-integration.json
+          retention-days: 7
