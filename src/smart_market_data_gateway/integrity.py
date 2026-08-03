@@ -95,9 +95,22 @@ async def verify_accepted_event_chain(
     connection: asyncpg.Connection,
     *,
     chain_name: str = ACCEPTED_EVENT_CHAIN_NAME,
+    use_existing_snapshot: bool = False,
 ) -> IntegrityVerification:
-    rows = await connection.fetch(
-        """
+    if use_existing_snapshot:
+        if not connection.is_in_transaction():
+            raise ValueError("use_existing_snapshot requires an active transaction")
+        return await _verify_accepted_event_chain_snapshot(connection, chain_name)
+
+    async with connection.transaction(isolation="repeatable_read", readonly=True):
+        return await _verify_accepted_event_chain_snapshot(connection, chain_name)
+
+
+async def _verify_accepted_event_chain_snapshot(
+    connection: asyncpg.Connection,
+    chain_name: str,
+) -> IntegrityVerification:
+    query = """
         SELECT
             integrity.chain_sequence,
             integrity.profile,
@@ -114,13 +127,12 @@ async def verify_accepted_event_chain(
          AND quote_events.provider_timestamp = integrity.provider_timestamp
         WHERE integrity.chain_name = $1
         ORDER BY integrity.chain_sequence
-        """,
-        chain_name,
-    )
+    """
 
     expected_sequence = 1
     previous_record_hash: str | None = None
-    for row in rows:
+    cursor = connection.cursor(query, chain_name, prefetch=500)
+    async for row in cursor:
         sequence = int(row["chain_sequence"])
         if sequence != expected_sequence:
             raise IntegrityChainError(
