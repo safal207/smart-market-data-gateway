@@ -112,10 +112,25 @@ class Settings(BaseSettings):
     entitlement_cache_ttl_seconds: int = 30
     shutdown_timeout_seconds: float = 10.0
 
+    provider: str = "mock"
+
     mock_symbols: str = "AAPL,TSLA,NVDA,MSFT,GOOG"
     mock_interval_seconds: float = 0.1
     mock_duplicate_every: int | None = None
     mock_fail_after_events: int | None = None
+
+    tradernet_mode: str = "public_demo"
+    tradernet_websocket_url: str = "wss://wss.tradernet.com/"
+    tradernet_snapshot_base_url: str = "https://tradernet.com"
+    tradernet_sid: str | None = None
+    tradernet_user_id: str | None = None
+    tradernet_api_key: str | None = None
+    tradernet_api_secret: str | None = None
+    tradernet_require_authenticated_sid: bool = True
+    tradernet_snapshot_fallback: bool = True
+    tradernet_connect_timeout_seconds: float = 10.0
+    tradernet_snapshot_timeout_seconds: float = 10.0
+    tradernet_integration_symbols: str = "AAPL.US,MSFT.US"
 
     tier_policies_json: str = json.dumps(DEFAULT_TIER_POLICIES)
 
@@ -127,6 +142,14 @@ class Settings(BaseSettings):
     @property
     def mock_symbol_list(self) -> list[str]:
         return [symbol.strip().upper() for symbol in self.mock_symbols.split(",") if symbol.strip()]
+
+    @property
+    def tradernet_symbol_list(self) -> list[str]:
+        return [
+            symbol.strip().upper()
+            for symbol in self.tradernet_integration_symbols.split(",")
+            if symbol.strip()
+        ]
 
     @property
     def candle_intervals(self) -> tuple[int, ...]:
