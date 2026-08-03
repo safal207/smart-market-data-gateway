@@ -87,7 +87,8 @@ History, candle construction, replay, future graph features, and future ML are o
 - watermark-based lateness policy that does not silently rewrite finalized candles;
 - deterministic replay at real time, accelerated time, or maximum speed;
 - PostgreSQL fallback when the TimescaleDB extension is unavailable;
-- retention policies disabled by default until licensing and audit requirements are agreed.
+- one active history writer owns candle state through a PostgreSQL advisory lock;
+- raw-data retention fails closed until integrity-preserving checkpoints or verifiable truncation exist.
 
 Critical transactional events such as order statuses, trade confirmations, risk events, and critical alerts are deliberately excluded from quote-throttling and replacement semantics.
 
@@ -144,7 +145,7 @@ WebSocket command:
 Replay accepted events to JSONL:
 
 ```bash
-smdg-replay \
+python -m smart_market_data_gateway.replay \
   --from 2026-08-01T12:00:00Z \
   --to 2026-08-01T13:00:00Z \
   --symbol AAPL \
@@ -157,7 +158,7 @@ Supported speed values include `1`, `10`, `1x`, `10x`, and `max`.
 Replay into a dedicated Redis stream:
 
 ```bash
-smdg-replay \
+python -m smart_market_data_gateway.replay \
   --from 2026-08-01T12:00:00Z \
   --speed max \
   --output-stream smdg:accepted-quotes:replay:v1
@@ -170,7 +171,7 @@ Use a dedicated replay stream unless duplicate live downstream processing is int
 Verify the accepted-event payload digests, sequence, previous-hash links, and persisted chain head before replay or feature generation:
 
 ```bash
-smdg-verify-history
+python -m smart_market_data_gateway.integrity
 ```
 
 A successful result is emitted as JSON. Any changed payload, missing record, sequence gap, broken link, profile mismatch, or incorrect head exits non-zero. This mechanism is tamper-evident; externally signed checkpoints are still required to resist a database administrator who can rewrite the complete chain.
