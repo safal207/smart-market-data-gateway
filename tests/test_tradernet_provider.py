@@ -10,6 +10,7 @@ from smart_market_data_gateway.providers import (
     ProviderState,
     TradernetAPIError,
     TradernetAuthenticationError,
+    TradernetError,
     TradernetMode,
     TradernetProviderAdapter,
     TradernetProviderConfig,
@@ -17,12 +18,20 @@ from smart_market_data_gateway.providers import (
 
 
 class FakeWebSocket:
-    def __init__(self, messages: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        messages: list[str] | None = None,
+        *,
+        send_error: Exception | None = None,
+    ) -> None:
         self.sent: list[str] = []
         self.messages = list(messages or [])
         self.closed = False
+        self.send_error = send_error
 
     async def send(self, payload: str) -> None:
+        if self.send_error is not None:
+            raise self.send_error
         self.sent.append(payload)
 
     async def recv(self) -> str:
@@ -125,6 +134,53 @@ async def test_subscription_is_replaced_and_restored_after_reconnect() -> None:
     assert (await provider.health()).state is ProviderState.CONNECTED
 
 
+async def test_disconnected_unsubscribe_is_applied_on_reconnect() -> None:
+    first = FakeWebSocket()
+    second = FakeWebSocket()
+    provider = TradernetProviderAdapter(
+        TradernetProviderConfig(mode=TradernetMode.PUBLIC_DEMO),
+        websocket_factory=FakeWebSocketFactory([first, second]),
+    )
+
+    await provider.subscribe(["AAPL.US", "MSFT.US"])
+    await provider.connect()
+    await provider.disconnect()
+    await provider.unsubscribe(["MSFT.US"])
+    await provider.connect()
+
+    assert json.loads(second.sent[-1]) == ["quotes", ["AAPL.US"]]
+
+
+def test_strict_sid_withholds_quotes_until_explicit_confirmation() -> None:
+    provider = TradernetProviderAdapter(
+        TradernetProviderConfig(
+            mode=TradernetMode.SID_SESSION,
+            sid="test-session",
+            require_authenticated_sid=True,
+        )
+    )
+    quote_frame = json.dumps(["q", [quote_payload()]])
+
+    assert provider.parse_message(quote_frame) == []
+    assert provider.session_confirmed is False
+    provider.parse_message(json.dumps(["userData", {"isDemo": False, "mode": "live"}]))
+    assert provider.session_confirmed is True
+    assert len(provider.parse_message(quote_frame)) == 1
+
+
+async def test_strict_sid_blocks_snapshot_before_confirmation() -> None:
+    provider = TradernetProviderAdapter(
+        TradernetProviderConfig(
+            mode=TradernetMode.SID_SESSION,
+            sid="test-session",
+            require_authenticated_sid=True,
+        )
+    )
+
+    with pytest.raises(TradernetAuthenticationError, match="confirmed"):
+        await provider.fetch_snapshots(["AAPL.US"])
+
+
 async def test_sid_expiry_is_detected_from_demo_user_data() -> None:
     provider = TradernetProviderAdapter(
         TradernetProviderConfig(
@@ -163,11 +219,36 @@ async def test_sid_rejection_closes_live_socket_and_remains_degraded() -> None:
     assert health.message is not None and "rejected or expired" in health.message
 
 
-async def test_public_demo_accepts_demo_user_data() -> None:
+async def test_connection_setup_failure_closes_assigned_socket() -> None:
+    socket = FakeWebSocket(send_error=ConnectionError("subscription failed"))
     provider = TradernetProviderAdapter(
-        TradernetProviderConfig(mode=TradernetMode.PUBLIC_DEMO)
+        TradernetProviderConfig(mode=TradernetMode.PUBLIC_DEMO),
+        websocket_factory=FakeWebSocketFactory([socket]),
+    )
+    await provider.subscribe(["AAPL.US"])
+
+    with pytest.raises(TradernetError, match="connection failed"):
+        await provider.connect()
+
+    assert socket.closed is True
+    assert (await provider.health()).state is ProviderState.DISCONNECTED
+
+
+async def test_public_demo_accepts_demo_user_data_and_ignores_sid_values() -> None:
+    socket = FakeWebSocket()
+    factory = FakeWebSocketFactory([socket])
+    provider = TradernetProviderAdapter(
+        TradernetProviderConfig(
+            mode=TradernetMode.PUBLIC_DEMO,
+            sid="must-not-be-used",
+            user_id="must-not-be-used",
+        ),
+        websocket_factory=factory,
     )
 
+    await provider.connect()
+    assert "SID=" not in factory.urls[0]
+    assert "user_id=" not in factory.urls[0]
     assert provider.parse_message(json.dumps(["userData", {"mode": "demo"}])) == []
     assert provider.session_info["mode"] == "demo"
 
@@ -179,7 +260,14 @@ async def test_snapshot_preserves_literal_plus_separator() -> None:
         observed_urls.append(str(request.url))
         return httpx.Response(
             200,
-            json={"result": {"q": {"0": quote_payload(), "1": {**quote_payload(), "c": "MSFT.US"}}}},
+            json={
+                "result": {
+                    "q": {
+                        "0": quote_payload(),
+                        "1": {**quote_payload(), "c": "MSFT.US"},
+                    }
+                }
+            },
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
