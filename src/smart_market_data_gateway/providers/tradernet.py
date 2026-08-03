@@ -183,7 +183,15 @@ class TradernetProviderAdapter(MarketDataProvider):
                         )
                 raise TradernetError(self._message) from exc
 
-            for event in self.parse_message(raw):
+            try:
+                parsed_events = self.parse_message(raw)
+            except TradernetAuthenticationError:
+                rejection_message = self._message or "Tradernet SID authentication failed"
+                await self.disconnect()
+                self._state = ProviderState.DEGRADED
+                self._message = rejection_message
+                raise
+            for event in parsed_events:
                 yield event
 
     def parse_message(self, raw: str | bytes) -> list[QuoteEvent]:
