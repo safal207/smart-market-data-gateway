@@ -1,0 +1,18 @@
+{
+  "protected_files": {
+    ".github/CODEOWNERS": "a25d3fa73560e293cff2578c3be63ab00e1e086f",
+    ".github/pull_request_template.md": "3d3a0bda57441e584b905f51a2644f4a96456e35",
+    ".github/workflows/causal-pr-gate.yml": "74d8423dd157b7dc1d29c299beadda252510b92e",
+    ".github/workflows/ci.yml": "965f09adc57a150b4aa7ddea6896717dd71939bf",
+    "AGENTS.md": "15ae19fe8e32b602151f88042559ff4567669c2b",
+    "docs/ci/CAUSAL_PR_GATE.md": "3117a52634a35f43d1ccaf5b63a26ee6f5736c30",
+    "pyproject.toml": "8770f5929f4957559213400a630ff2377da1af87",
+    "scripts/ci/build_causal_pr_report.py": "7482652eec28335ce40facae9010b734dc5193bb",
+    "scripts/ci/check_causal_trust_root.py": "9dea68e82bcd3ec34e69339925074b3c2497dc0a",
+    "scripts/ci/check_causal_workflow_contract.py": "2df8702cff6bb67022c4af8dfc6c8e08a19d0898",
+    "tests/test_causal_pr_contract.py": "a1fdb31f6382559f4393f59b24801f5b928477a4",
+    "tests/test_causal_trust_root.py": "dd230e11787b0aec49c61953f76fa30ca8e921ff",
+    "tests/test_causal_workflow_contract.py": "d3450bc2e643490bcdea26d9b638a23973c723d4"
+  },
+  "schema_version": 1
+}
