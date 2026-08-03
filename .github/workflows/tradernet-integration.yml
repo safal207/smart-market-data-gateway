@@ -40,14 +40,14 @@ jobs:
       SMDG_TRADERNET_MODE: ${{ inputs.mode }}
       SMDG_TRADERNET_WEBSOCKET_URL: ${{ inputs.websocket_url }}
       SMDG_TRADERNET_INTEGRATION_SYMBOLS: ${{ inputs.symbols }}
-      SMDG_TRADERNET_SID: ${{ secrets.TRADERNET_SID }}
-      SMDG_TRADERNET_USER_ID: ${{ secrets.TRADERNET_USER_ID }}
       SMDG_TRADERNET_REQUIRE_AUTHENTICATED_SID: "true"
       SMDG_TRADERNET_SNAPSHOT_FALLBACK: "true"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -60,6 +60,8 @@ jobs:
 
       - name: Validate SID secret for authenticated mode
         if: ${{ inputs.mode == 'sid_session' }}
+        env:
+          SMDG_TRADERNET_SID: ${{ secrets.TRADERNET_SID }}
         run: |
           if [ -z "$SMDG_TRADERNET_SID" ]; then
             echo "TRADERNET_SID repository secret is required for sid_session mode" >&2
@@ -67,11 +69,17 @@ jobs:
           fi
 
       - name: Run quote and reconnect checks
+        env:
+          SMDG_TRADERNET_SID: ${{ secrets.TRADERNET_SID }}
+          SMDG_TRADERNET_USER_ID: ${{ secrets.TRADERNET_USER_ID }}
+          INPUT_SYMBOLS: ${{ inputs.symbols }}
+          INPUT_EVENTS: ${{ inputs.events }}
+          INPUT_TIMEOUT: ${{ inputs.timeout_seconds }}
         run: >-
           python scripts/tradernet_integration.py
-          --symbols "${{ inputs.symbols }}"
-          --events "${{ inputs.events }}"
-          --timeout "${{ inputs.timeout_seconds }}"
+          --symbols "$INPUT_SYMBOLS"
+          --events "$INPUT_EVENTS"
+          --timeout "$INPUT_TIMEOUT"
           --output benchmark-results/tradernet-integration.json
 
       - name: Upload sanitized report
