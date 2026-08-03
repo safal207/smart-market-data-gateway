@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from benchmarks.run_tradernet_profile import (
+from smart_market_data_gateway.provider_attestation import (
     load_attestation,
     require_publication_approval,
 )
@@ -94,11 +94,14 @@ def test_sid_and_legacy_reports_fail_closed_without_approval(tmp_path) -> None:
         require_publication_approval("legacy-673", sid_attestation)
 
 
-def test_recent_approved_sid_attestation_allows_restricted_profile(tmp_path) -> None:
+def test_recent_approved_sid_attestation_allows_restricted_profile(
+    tmp_path,
+) -> None:
+    issued_at = datetime(2026, 8, 4, 1, tzinfo=UTC) - timedelta(minutes=5)
     path = write_attestation(
         tmp_path,
         data_mode="sid",
-        issued_at=(datetime(2026, 8, 4, 1, tzinfo=UTC) - timedelta(minutes=5)).isoformat(),
+        issued_at=issued_at.isoformat(),
         licensing_approved_for_publication=True,
     )
     attestation = load_attestation(
