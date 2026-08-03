@@ -68,7 +68,21 @@ jobs:
             exit 1
           fi
 
-      - name: Run quote and reconnect checks
+      - name: Run public-demo quote and reconnect checks
+        if: ${{ inputs.mode == 'public_demo' }}
+        env:
+          INPUT_SYMBOLS: ${{ inputs.symbols }}
+          INPUT_EVENTS: ${{ inputs.events }}
+          INPUT_TIMEOUT: ${{ inputs.timeout_seconds }}
+        run: >-
+          python scripts/tradernet_integration.py
+          --symbols "$INPUT_SYMBOLS"
+          --events "$INPUT_EVENTS"
+          --timeout "$INPUT_TIMEOUT"
+          --output benchmark-results/tradernet-integration.json
+
+      - name: Run authenticated quote and reconnect checks
+        if: ${{ inputs.mode == 'sid_session' }}
         env:
           SMDG_TRADERNET_SID: ${{ secrets.TRADERNET_SID }}
           SMDG_TRADERNET_USER_ID: ${{ secrets.TRADERNET_USER_ID }}
