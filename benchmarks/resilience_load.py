@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from datetime import datetime
+from datetime import UTC, datetime
 import json
 from pathlib import Path
 import random
@@ -16,6 +16,20 @@ import websockets
 def websocket_url(base: str, token: str) -> str:
     separator = "&" if "?" in base else "?"
     return f"{base}{separator}token={token}"
+
+
+def parse_utc_timestamp(value: Any) -> datetime:
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("quote timestamp must be timezone-aware")
+    return parsed.astimezone(UTC)
+
+
+def quote_was_received_after(quote: dict[str, Any], cutoff: datetime) -> bool:
+    received_at = quote.get("received_at")
+    if received_at is None:
+        return False
+    return parse_utc_timestamp(received_at) > cutoff
 
 
 async def connect_and_subscribe(
@@ -53,6 +67,19 @@ async def receive_quote(socket: Any, timeout_seconds: float) -> dict[str, Any]:
             payload = json.loads(raw)
             if payload.get("type") == "quote":
                 return dict(payload["data"]["quote"])
+
+
+async def receive_quote_after(
+    socket: Any,
+    *,
+    cutoff: datetime,
+    timeout_seconds: float,
+) -> bool:
+    async with asyncio.timeout(timeout_seconds):
+        while True:
+            quote = await receive_quote(socket, timeout_seconds)
+            if quote_was_received_after(quote, cutoff):
+                return True
 
 
 async def close_sockets(sockets: list[Any]) -> None:
@@ -153,45 +180,35 @@ async def frozen_stream(args: argparse.Namespace, assignments: list[list[str]]) 
         *(receive_quote(socket, args.timeout) for socket in sockets),
         return_exceptions=True,
     )
-    first_quotes = [result if isinstance(result, dict) else None for result in first_results]
+    clients_with_initial_quote = sum(isinstance(result, dict) for result in first_results)
     await asyncio.sleep(args.pause_seconds)
 
-    async def receive_advanced(socket: Any, first: dict[str, Any] | None) -> bool:
-        if first is None:
-            return False
-
-        reference_timestamp = datetime.fromisoformat(str(first["provider_timestamp"]))
-        drain_deadline = asyncio.get_running_loop().time() + min(1.0, args.timeout / 4)
-        while asyncio.get_running_loop().time() < drain_deadline:
-            try:
-                buffered = await receive_quote(socket, 0.01)
-            except TimeoutError:
-                break
-            buffered_timestamp = datetime.fromisoformat(
-                str(buffered["provider_timestamp"])
-            )
-            reference_timestamp = max(reference_timestamp, buffered_timestamp)
-
-        async with asyncio.timeout(args.timeout):
-            while True:
-                quote = await receive_quote(socket, args.timeout)
-                timestamp = datetime.fromisoformat(str(quote["provider_timestamp"]))
-                if timestamp > reference_timestamp:
-                    return True
-
+    # Quotes already queued before this instant are backlog by definition. Recovery is
+    # credited only after the gateway emits a quote whose own receive timestamp is later
+    # than the cutoff; merely observing a later provider timestamp cannot pass the test.
+    resume_cutoff = datetime.now(UTC)
     resumed = await asyncio.gather(
-        *(receive_advanced(socket, first) for socket, first in zip(sockets, first_quotes, strict=True)),
+        *(
+            receive_quote_after(
+                socket,
+                cutoff=resume_cutoff,
+                timeout_seconds=args.timeout,
+            )
+            for socket in sockets
+        ),
         return_exceptions=True,
     )
-    advanced = sum(result is True for result in resumed)
+    recovered = sum(result is True for result in resumed)
     errors = [str(result) for result in resumed if isinstance(result, Exception)]
     await close_sockets(sockets)
 
     return {
         "connected_clients": len(sockets),
+        "clients_with_initial_quote": clients_with_initial_quote,
         "pause_seconds": args.pause_seconds,
-        "clients_with_advanced_timestamp_after_resume": advanced,
-        "failed_or_frozen_clients": len(sockets) - advanced,
+        "resume_cutoff": resume_cutoff.isoformat(),
+        "clients_with_post_resume_quote": recovered,
+        "failed_or_frozen_clients": len(sockets) - recovered,
         "errors": errors[:100],
     }
 
