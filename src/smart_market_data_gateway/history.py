@@ -34,6 +34,7 @@ REQUIRED_TABLES = (
     "candles",
     "late_quote_events",
 )
+HISTORY_WRITER_ADVISORY_LOCK = 0x534D444748495354
 
 _INSERT_EVENT = """
 INSERT INTO quote_events (
@@ -170,6 +171,7 @@ class HistorySink:
         self.store = RedisStore(redis, config)
         self.consumer_name = f"history-sink-{uuid4()}"
         self.pool: asyncpg.Pool | None = None
+        self._lock_connection: asyncpg.Connection | None = None
         self.builder = CandleBuilder(
             config.candle_intervals,
             allowed_lateness_seconds=config.candle_allowed_lateness_seconds,
@@ -178,20 +180,45 @@ class HistorySink:
         self._closed = False
 
     async def start(self) -> None:
-        self.pool = await asyncpg.create_pool(
+        if self.pool is not None or self._lock_connection is not None:
+            raise RuntimeError("history sink is already started")
+        self._closed = False
+        self._lock_connection = await asyncpg.connect(
             dsn=self.config.database_url,
-            min_size=1,
-            max_size=4,
             command_timeout=self.config.history_command_timeout_seconds,
         )
-        async with self.pool.acquire() as connection:
-            await self._verify_schema(connection)
-            await self._configure_retention(connection)
-            await self._hydrate_builder(connection)
-        await self.store.ensure_group(
-            self.config.accepted_event_stream,
-            self.config.history_group,
+        locked = bool(
+            await self._lock_connection.fetchval(
+                "SELECT pg_try_advisory_lock($1::bigint)",
+                HISTORY_WRITER_ADVISORY_LOCK,
+            )
         )
+        if not locked:
+            await self._release_writer_lock()
+            raise RuntimeError(
+                "another history writer is already active; candle state requires one owner"
+            )
+        try:
+            self.pool = await asyncpg.create_pool(
+                dsn=self.config.database_url,
+                min_size=1,
+                max_size=4,
+                command_timeout=self.config.history_command_timeout_seconds,
+            )
+            async with self.pool.acquire() as connection:
+                await self._verify_schema(connection)
+                await self._configure_retention(connection)
+                await self._hydrate_builder(connection)
+            await self.store.ensure_group(
+                self.config.accepted_event_stream,
+                self.config.history_group,
+            )
+        except Exception:
+            if self.pool is not None:
+                await self.pool.close()
+                self.pool = None
+            await self._release_writer_lock()
+            raise
 
     async def _verify_schema(self, connection: asyncpg.Connection) -> None:
         migration_table = await connection.fetchval(
@@ -226,23 +253,22 @@ class HistorySink:
             )
         )
         if not has_timescale:
+            if self.config.enable_history_retention:
+                raise RuntimeError(
+                    "history retention is unavailable without integrity-preserving checkpoints"
+                )
             return
-        if not self.config.enable_history_retention:
-            await connection.execute(
-                "SELECT remove_retention_policy('quote_events', if_exists => TRUE)"
-            )
-            await connection.execute(
-                "SELECT remove_retention_policy('candles', if_exists => TRUE)"
-            )
-            return
+
         await connection.execute(
-            "SELECT add_retention_policy('quote_events', make_interval(days => $1), if_not_exists => TRUE)",
-            self.config.quote_event_retention_days,
+            "SELECT remove_retention_policy('quote_events', if_exists => TRUE)"
         )
         await connection.execute(
-            "SELECT add_retention_policy('candles', make_interval(days => $1), if_not_exists => TRUE)",
-            self.config.candle_retention_days,
+            "SELECT remove_retention_policy('candles', if_exists => TRUE)"
         )
+        if self.config.enable_history_retention:
+            raise RuntimeError(
+                "history retention is unavailable without integrity-preserving checkpoints"
+            )
 
     async def _hydrate_builder(self, connection: asyncpg.Connection) -> None:
         has_events = await connection.fetchval("SELECT EXISTS (SELECT 1 FROM quote_events)")
@@ -448,11 +474,26 @@ class HistorySink:
             candle.schema_version,
         )
 
+    async def _release_writer_lock(self) -> None:
+        connection = self._lock_connection
+        self._lock_connection = None
+        if connection is None:
+            return
+        try:
+            if not connection.is_closed():
+                await connection.execute(
+                    "SELECT pg_advisory_unlock($1::bigint)",
+                    HISTORY_WRITER_ADVISORY_LOCK,
+                )
+        finally:
+            await connection.close()
+
     async def close(self) -> None:
         self._closed = True
         if self.pool is not None:
             await self.pool.close()
             self.pool = None
+        await self._release_writer_lock()
 
 
 def _parse_stream_order(source_stream_id: str | None) -> tuple[int | None, int | None]:
