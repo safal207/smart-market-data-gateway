@@ -1,5 +1,6 @@
 from pathlib import Path
 import os
+from uuid import uuid4
 
 import asyncpg
 import pytest
@@ -74,4 +75,42 @@ async def test_authoritative_migration_is_idempotent() -> None:
             "SELECT to_regclass('public.accepted_event_integrity') IS NOT NULL"
         )
     finally:
+        await connection.close()
+
+
+async def test_migration_rejects_legacy_quotes_without_integrity_backfill() -> None:
+    connection = await asyncpg.connect(database_url())
+    schema = f"migration_legacy_{uuid4().hex}"
+    try:
+        await connection.execute(f'CREATE SCHEMA "{schema}"')
+        await connection.execute(f'SET search_path TO "{schema}", public')
+        await connection.execute(
+            """
+            CREATE TABLE quote_events (
+                event_id UUID NOT NULL,
+                provider_timestamp TIMESTAMPTZ NOT NULL
+            )
+            """
+        )
+        await connection.execute(
+            "INSERT INTO quote_events (event_id, provider_timestamp) VALUES ($1, NOW())",
+            uuid4(),
+        )
+
+        with pytest.raises(
+            asyncpg.PostgresError,
+            match="explicit accepted-event integrity backfill",
+        ):
+            await apply_migrations(connection, MIGRATIONS_DIR)
+
+        assert await connection.fetchval(
+            """
+            SELECT COUNT(*)
+            FROM schema_migrations
+            WHERE version = '001_temporal_market_foundation.sql'
+            """
+        ) == 0
+    finally:
+        await connection.execute("RESET search_path")
+        await connection.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
         await connection.close()

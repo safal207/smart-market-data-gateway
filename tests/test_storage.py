@@ -74,7 +74,7 @@ async def test_stale_snapshot_and_many(redis_client, test_settings) -> None:
     assert result["UNKNOWN"] is None
 
 
-async def test_accepted_stream_does_not_trim_unacknowledged_events(
+async def test_accepted_stream_does_not_trim_without_history_group(
     redis_client,
     test_settings,
 ) -> None:
@@ -86,6 +86,82 @@ async def test_accepted_stream_does_not_trim_unacknowledged_events(
 
     entries = await redis_client.xrange(durable_settings.accepted_event_stream)
     assert [entry_id for entry_id, _fields in entries] == [first_id, second_id]
+
+
+async def test_accepted_stream_compacts_acknowledged_entries(
+    redis_client,
+    test_settings,
+) -> None:
+    durable_settings = test_settings.model_copy(update={"accepted_stream_maxlen": 1})
+    store = RedisStore(redis_client, durable_settings)
+    await store.ensure_group(
+        durable_settings.accepted_event_stream,
+        durable_settings.history_group,
+    )
+
+    stream_ids = [
+        await store.publish_accepted_event(accepted(sequence=sequence))
+        for sequence in (1, 2, 3)
+    ]
+    messages = await store.read_group(
+        durable_settings.accepted_event_stream,
+        durable_settings.history_group,
+        "history-consumer",
+        count=10,
+        block_ms=10,
+    )
+    assert [stream_id for stream_id, _fields in messages] == stream_ids
+
+    await store.ack(
+        durable_settings.accepted_event_stream,
+        durable_settings.history_group,
+        *stream_ids,
+    )
+
+    entries = await redis_client.xrange(durable_settings.accepted_event_stream)
+    assert entries == []
+
+
+async def test_accepted_stream_preserves_oldest_pending_and_newer_entries(
+    redis_client,
+    test_settings,
+) -> None:
+    durable_settings = test_settings.model_copy(update={"accepted_stream_maxlen": 1})
+    store = RedisStore(redis_client, durable_settings)
+    await store.ensure_group(
+        durable_settings.accepted_event_stream,
+        durable_settings.history_group,
+    )
+
+    stream_ids = [
+        await store.publish_accepted_event(accepted(sequence=sequence))
+        for sequence in (1, 2, 3)
+    ]
+    messages = await store.read_group(
+        durable_settings.accepted_event_stream,
+        durable_settings.history_group,
+        "history-consumer",
+        count=2,
+        block_ms=10,
+    )
+    assert [stream_id for stream_id, _fields in messages] == stream_ids[:2]
+
+    await store.ack(
+        durable_settings.accepted_event_stream,
+        durable_settings.history_group,
+        stream_ids[0],
+    )
+
+    entries = await redis_client.xrange(durable_settings.accepted_event_stream)
+    assert [entry_id for entry_id, _fields in entries] == stream_ids[1:]
+    pending = await redis_client.xpending(
+        durable_settings.accepted_event_stream,
+        durable_settings.history_group,
+    )
+    pending_count = pending["pending"] if isinstance(pending, dict) else pending[0]
+    oldest = pending["min"] if isinstance(pending, dict) else pending[1]
+    assert int(pending_count) == 1
+    assert str(oldest) == stream_ids[1]
 
 
 def test_normalize_entries_skips_deleted_stream_payloads() -> None:

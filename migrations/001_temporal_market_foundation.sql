@@ -35,6 +35,21 @@ CREATE TABLE IF NOT EXISTS quote_events (
         OR (source_stream_ms >= 0 AND source_stream_sequence >= 0)
     )
 );
+
+-- This migration cannot invent provenance for prototype history. A database
+-- containing pre-migration quote rows must be backfilled explicitly before the
+-- accepted-event integrity boundary can be declared active. Raising here keeps
+-- migration 001 out of schema_migrations and leaves the operator a recoverable,
+-- visible cutover decision instead of creating an empty chain over legacy data.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM quote_events LIMIT 1) THEN
+        RAISE EXCEPTION
+            'legacy quote_events rows require an explicit accepted-event integrity backfill before migration 001';
+    END IF;
+END
+$$;
+
 CREATE INDEX IF NOT EXISTS quote_events_symbol_time_idx
     ON quote_events (symbol, provider_timestamp DESC);
 CREATE INDEX IF NOT EXISTS quote_events_provider_time_idx

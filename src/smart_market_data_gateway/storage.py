@@ -80,6 +80,7 @@ class RedisStore:
                 "quality_score": str(accepted.quality.score),
             },
         )
+        await self._compact_accepted_stream()
         return str(stream_id)
 
     async def publish_rejected_event(self, rejected: RejectedQuoteEvent) -> str:
@@ -152,8 +153,66 @@ class RedisStore:
         return self._normalize_entries(entries)
 
     async def ack(self, stream: str, group: str, *stream_ids: str) -> None:
-        if stream_ids:
-            await self.redis.xack(stream, group, *stream_ids)
+        if not stream_ids:
+            return
+        await self.redis.xack(stream, group, *stream_ids)
+        if (
+            stream == self.settings.accepted_event_stream
+            and group == self.settings.history_group
+        ):
+            await self._compact_accepted_stream()
+
+    async def _compact_accepted_stream(self) -> None:
+        """Trim only history entries proven safe by consumer-group progress."""
+        stream = self.settings.accepted_event_stream
+        target = self.settings.accepted_stream_maxlen
+        if target <= 0:
+            return
+        try:
+            if int(await self.redis.xlen(stream)) <= target:
+                return
+            groups = await self.redis.xinfo_groups(stream)
+        except ResponseError:
+            return
+
+        history_group: Any | None = None
+        for group in groups:
+            name = self._mapping_value(group, "name")
+            if self._as_text(name) == self.settings.history_group:
+                history_group = group
+                break
+        if history_group is None:
+            return
+
+        try:
+            pending = await self.redis.xpending(stream, self.settings.history_group)
+        except ResponseError:
+            return
+        pending_count, oldest_pending = self._pending_summary(pending)
+
+        threshold: str | None = None
+        if pending_count > 0:
+            threshold = self._as_text(oldest_pending)
+        else:
+            last_delivered = self._as_text(
+                self._mapping_value(history_group, "last-delivered-id")
+            )
+            if not last_delivered or last_delivered == "0-0":
+                return
+            newer = await self.redis.xrange(
+                stream,
+                min=f"({last_delivered}",
+                max="+",
+                count=1,
+            )
+            if newer:
+                threshold = self._as_text(newer[0][0])
+            else:
+                threshold = self._next_stream_id(last_delivered)
+
+        if not threshold:
+            return
+        await self.redis.execute_command("XTRIM", stream, "MINID", threshold)
 
     async def cache_quote(self, event: QuoteEvent) -> None:
         await self.redis.set(f"smdg:latest:{event.symbol}", event.model_dump_json())
@@ -351,6 +410,42 @@ class RedisStore:
         if isinstance(summary, (list, tuple)) and summary:
             return int(summary[0])
         return 0
+
+    @staticmethod
+    def _mapping_value(mapping: Any, name: str) -> Any:
+        if not isinstance(mapping, dict):
+            return None
+        if name in mapping:
+            return mapping[name]
+        encoded = name.encode()
+        return mapping.get(encoded)
+
+    @classmethod
+    def _pending_summary(cls, summary: Any) -> tuple[int, Any | None]:
+        if isinstance(summary, dict):
+            return (
+                int(cls._mapping_value(summary, "pending") or 0),
+                cls._mapping_value(summary, "min"),
+            )
+        if isinstance(summary, (list, tuple)) and summary:
+            oldest = summary[1] if len(summary) > 1 else None
+            return int(summary[0]), oldest
+        return 0, None
+
+    @staticmethod
+    def _as_text(value: Any) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, bytes):
+            return value.decode()
+        return str(value)
+
+    @staticmethod
+    def _next_stream_id(stream_id: str) -> str:
+        milliseconds, separator, sequence = stream_id.partition("-")
+        if not separator:
+            raise ValueError(f"invalid Redis Stream ID: {stream_id}")
+        return f"{int(milliseconds)}-{int(sequence) + 1}"
 
     @staticmethod
     def _normalize_entries(entries: Any) -> list[StreamMessage]:

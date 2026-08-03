@@ -4,6 +4,7 @@ import logging
 from uuid import UUID, uuid4
 
 import asyncpg
+from pydantic import ValidationError
 from redis.asyncio import Redis
 
 from smart_market_data_gateway.candles import (
@@ -35,6 +36,8 @@ REQUIRED_TABLES = (
     "late_quote_events",
 )
 HISTORY_WRITER_ADVISORY_LOCK = 0x534D444748495354
+HISTORY_WRITER_LOCK_CLASS_ID = 1_397_572_679
+HISTORY_WRITER_LOCK_OBJECT_ID = 1_212_765_012
 
 _INSERT_EVENT = """
 INSERT INTO quote_events (
@@ -159,6 +162,23 @@ ORDER BY
     event_id
 """
 
+_VERIFY_WRITER_LOCK = """
+SELECT EXISTS (
+    SELECT 1
+    FROM pg_locks
+    WHERE locktype = 'advisory'
+      AND pid = pg_backend_pid()
+      AND classid = $1::oid
+      AND objid = $2::oid
+      AND objsubid = 1
+      AND granted
+)
+"""
+
+
+class HistoryOwnershipLost(RuntimeError):
+    """Raised when the session that fences singleton candle ownership is lost."""
+
 
 class HistorySink:
     """Persists accepted quotes and deterministic candles outside the gateway hot path."""
@@ -183,22 +203,22 @@ class HistorySink:
         if self.pool is not None or self._lock_connection is not None:
             raise RuntimeError("history sink is already started")
         self._closed = False
-        self._lock_connection = await asyncpg.connect(
-            dsn=self.config.database_url,
-            command_timeout=self.config.history_command_timeout_seconds,
-        )
-        locked = bool(
-            await self._lock_connection.fetchval(
-                "SELECT pg_try_advisory_lock($1::bigint)",
-                HISTORY_WRITER_ADVISORY_LOCK,
-            )
-        )
-        if not locked:
-            await self._release_writer_lock()
-            raise RuntimeError(
-                "another history writer is already active; candle state requires one owner"
-            )
         try:
+            self._lock_connection = await asyncpg.connect(
+                dsn=self.config.database_url,
+                command_timeout=self.config.history_command_timeout_seconds,
+            )
+            locked = bool(
+                await self._lock_connection.fetchval(
+                    "SELECT pg_try_advisory_lock($1::bigint)",
+                    HISTORY_WRITER_ADVISORY_LOCK,
+                )
+            )
+            if not locked:
+                raise RuntimeError(
+                    "another history writer is already active; "
+                    "candle state requires one owner"
+                )
             self.pool = await asyncpg.create_pool(
                 dsn=self.config.database_url,
                 min_size=1,
@@ -255,7 +275,8 @@ class HistorySink:
         if not has_timescale:
             if self.config.enable_history_retention:
                 raise RuntimeError(
-                    "history retention is unavailable without integrity-preserving checkpoints"
+                    "history retention is unavailable without "
+                    "integrity-preserving checkpoints"
                 )
             return
 
@@ -271,7 +292,9 @@ class HistorySink:
             )
 
     async def _hydrate_builder(self, connection: asyncpg.Connection) -> None:
-        has_events = await connection.fetchval("SELECT EXISTS (SELECT 1 FROM quote_events)")
+        has_events = await connection.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM quote_events)"
+        )
         if not has_events:
             return
         lookback = timedelta(
@@ -281,13 +304,44 @@ class HistorySink:
         async with connection.transaction():
             cursor = connection.cursor(_HYDRATE_QUERY, lookback, prefetch=500)
             async for row in cursor:
-                self.builder.add(AcceptedQuoteEvent.model_validate_json(row["payload"]))
+                self.builder.add(
+                    AcceptedQuoteEvent.model_validate_json(row["payload"])
+                )
+
+    def _writer_connection(self) -> asyncpg.Connection:
+        connection = self._lock_connection
+        if connection is None or connection.is_closed():
+            raise HistoryOwnershipLost(
+                "history writer advisory-lock session was lost; stopping fail closed"
+            )
+        return connection
+
+    async def _assert_writer_ownership(self) -> asyncpg.Connection:
+        connection = self._writer_connection()
+        try:
+            owns_lock = bool(
+                await connection.fetchval(
+                    _VERIFY_WRITER_LOCK,
+                    HISTORY_WRITER_LOCK_CLASS_ID,
+                    HISTORY_WRITER_LOCK_OBJECT_ID,
+                )
+            )
+        except Exception as exc:
+            raise HistoryOwnershipLost(
+                "history writer advisory-lock session could not be verified"
+            ) from exc
+        if not owns_lock:
+            raise HistoryOwnershipLost(
+                "history writer no longer owns the singleton advisory lock"
+            )
+        return connection
 
     async def run(self) -> None:
         if self.pool is None:
             await self.start()
         while not self._closed:
             try:
+                await self._assert_writer_ownership()
                 messages = await self.store.claim_stale(
                     self.config.accepted_event_stream,
                     self.config.history_group,
@@ -310,7 +364,22 @@ class HistorySink:
                     await self._persist(stream_id, fields)
             except asyncio.CancelledError:
                 raise
+            except HistoryOwnershipLost:
+                self._closed = True
+                logger.exception(
+                    "history writer ownership lost; stopping fail closed",
+                    extra={"event": "history_writer_ownership_lost"},
+                )
+                raise
             except Exception:
+                if (
+                    self._lock_connection is None
+                    or self._lock_connection.is_closed()
+                ):
+                    self._closed = True
+                    raise HistoryOwnershipLost(
+                        "history writer advisory-lock session was lost"
+                    )
                 logger.exception(
                     "history sink loop failed",
                     extra={"event": "history_sink_failed"},
@@ -320,33 +389,38 @@ class HistorySink:
     async def _persist(self, stream_id: str, fields: dict[str, str]) -> None:
         if self.pool is None:
             raise RuntimeError("history sink is not started")
-        accepted = AcceptedQuoteEvent.model_validate_json(fields["payload"])
+        try:
+            accepted = AcceptedQuoteEvent.model_validate_json(fields["payload"])
+        except (KeyError, ValidationError, ValueError) as exc:
+            await self._handle_poison_message(stream_id, fields, exc)
+            return
+
+        connection = await self._assert_writer_ownership()
         checkpoint: CandleSymbolCheckpoint | None = None
         committed = False
         try:
-            async with self.pool.acquire() as connection:
-                async with connection.transaction():
-                    inserted = await self._insert_event(connection, accepted)
-                    if inserted is not None:
-                        crash_if(
-                            self.failpoint,
-                            HistoryFailpoint.AFTER_LEDGER_APPEND_BEFORE_COMMIT,
+            async with connection.transaction():
+                inserted = await self._insert_event(connection, accepted)
+                if inserted is not None:
+                    crash_if(
+                        self.failpoint,
+                        HistoryFailpoint.AFTER_LEDGER_APPEND_BEFORE_COMMIT,
+                    )
+                    checkpoint = self.builder.checkpoint_symbol(
+                        accepted.event.symbol
+                    )
+                    result = self.builder.add(accepted)
+                    for interval in result.late_intervals:
+                        await connection.execute(
+                            _INSERT_LATE_EVENT,
+                            accepted.event.event_id,
+                            accepted.event.provider_timestamp,
+                            accepted.event.symbol,
+                            interval,
+                            accepted.model_dump_json(),
                         )
-                        checkpoint = self.builder.checkpoint_symbol(
-                            accepted.event.symbol
-                        )
-                        result = self.builder.add(accepted)
-                        for interval in result.late_intervals:
-                            await connection.execute(
-                                _INSERT_LATE_EVENT,
-                                accepted.event.event_id,
-                                accepted.event.provider_timestamp,
-                                accepted.event.symbol,
-                                interval,
-                                accepted.model_dump_json(),
-                            )
-                        for candle in result.finalized:
-                            await self._upsert_candle(connection, candle)
+                    for candle in result.finalized:
+                        await self._upsert_candle(connection, candle)
             committed = True
             crash_if(
                 self.failpoint,
@@ -357,34 +431,44 @@ class HistorySink:
                 self.config.history_group,
                 stream_id,
             )
-        except Exception as exc:
+        except Exception:
             if checkpoint is not None and not committed:
                 self.builder.restore_symbol(checkpoint)
-            retry_count = await self.store.increment_retry(
-                f"history:{self.config.accepted_event_stream}:{stream_id}"
-            )
-            if retry_count >= self.config.retry_limit:
-                await self.store.move_to_dead_letter(
-                    source_stream=self.config.accepted_event_stream,
-                    stream_id=stream_id,
-                    payload=fields,
-                    error=str(exc),
-                    retry_count=retry_count,
-                )
-                await self.store.ack(
-                    self.config.accepted_event_stream,
-                    self.config.history_group,
-                    stream_id,
-                )
-            else:
-                raise
+            raise
+
+    async def _handle_poison_message(
+        self,
+        stream_id: str,
+        fields: dict[str, str],
+        exc: Exception,
+    ) -> None:
+        retry_count = await self.store.increment_retry(
+            f"history:{self.config.accepted_event_stream}:{stream_id}"
+        )
+        if retry_count < self.config.retry_limit:
+            raise exc
+        await self.store.move_to_dead_letter(
+            source_stream=self.config.accepted_event_stream,
+            stream_id=stream_id,
+            payload=fields,
+            error=str(exc),
+            retry_count=retry_count,
+        )
+        await self.store.ack(
+            self.config.accepted_event_stream,
+            self.config.history_group,
+            stream_id,
+        )
 
     async def _persist_integrity_record(
         self,
         connection: asyncpg.Connection,
         accepted: AcceptedQuoteEvent,
     ) -> None:
-        await connection.execute(_INITIALIZE_INTEGRITY_HEAD, ACCEPTED_EVENT_CHAIN_NAME)
+        await connection.execute(
+            _INITIALIZE_INTEGRITY_HEAD,
+            ACCEPTED_EVENT_CHAIN_NAME,
+        )
         head = await connection.fetchrow(
             _LOCK_INTEGRITY_HEAD,
             ACCEPTED_EVENT_CHAIN_NAME,
@@ -392,7 +476,10 @@ class HistorySink:
         if head is None:
             raise RuntimeError("accepted-event integrity chain head is unavailable")
         previous_record_hash = head["record_hash"]
-        if previous_record_hash is not None and not isinstance(previous_record_hash, str):
+        if previous_record_hash is not None and not isinstance(
+            previous_record_hash,
+            str,
+        ):
             raise RuntimeError("accepted-event integrity chain head is invalid")
         sequence = int(head["chain_sequence"]) + 1
         record = build_integrity_record(
@@ -425,7 +512,9 @@ class HistorySink:
         accepted: AcceptedQuoteEvent,
     ) -> UUID | None:
         event = accepted.event
-        stream_ms, stream_sequence = _parse_stream_order(accepted.source_stream_id)
+        stream_ms, stream_sequence = _parse_stream_order(
+            accepted.source_stream_id
+        )
         value = await connection.fetchval(
             _INSERT_EVENT,
             event.event_id,
@@ -496,7 +585,9 @@ class HistorySink:
         await self._release_writer_lock()
 
 
-def _parse_stream_order(source_stream_id: str | None) -> tuple[int | None, int | None]:
+def _parse_stream_order(
+    source_stream_id: str | None,
+) -> tuple[int | None, int | None]:
     if not source_stream_id:
         return None, None
     milliseconds, separator, sequence = source_stream_id.partition("-")

@@ -1,149 +1,138 @@
-# LiminalDB integrity alignment
+# LiminalDB Integrity Alignment
 
-This gateway reuses selected **engineering invariants** from the sibling
-[`safal207/LiminalDB`](https://github.com/safal207/LiminalDB) repository while
-keeping both systems operationally independent.
+## Purpose
 
-No Rust source is vendored, no branches are merged, and LiminalDB is not a
-runtime dependency. LiminalDB is Apache-2.0; this repository remains MIT. The
-alignment is architectural, protocol-level, and independently implemented.
+This document describes the integrity boundary implemented by the Smart Market
+Data Gateway and the specific ideas it reuses from the sibling LiminalDB
+project. It is an alignment document, not a claim that the Python gateway has
+LiminalDB's Rust WAL, snapshot, signed-checkpoint, or anti-rollback guarantees.
 
-LiminalDB records and replays evidence and continuity. It does **not** create a
-scientific or market verdict. The gateway remains responsible for market-data
-normalization, temporal guards, accepted history, candles, and replay.
+## Accepted-event boundary
 
-## Adopted principles
+Only an `AcceptedQuoteEvent` may enter durable market history. Acceptance occurs
+after validation, deduplication, freshness checks, temporal ordering checks, and
+quality scoring. Rejected, stale, and out-of-order events are audited separately
+and do not update the latest cache or the accepted-event history.
 
-### 1. Durable fact and derived projection are different things
+The accepted event records:
 
-The accepted quote is the durable fact. Candles, future graph features, and
-predictions are rebuildable projections. A projection must never become the
-only surviving evidence of its input.
+- the immutable normalized quote;
+- the acceptance timestamp and data cutoff;
+- source provider and normalization version;
+- quality score and gap metadata;
+- the originating Redis Stream ID when one exists.
 
-### 2. Every durable record has a canonical payload digest
+## Canonical payload digest
 
-`AcceptedQuoteEvent` is serialized into canonical sorted JSON and hashed with
-SHA-256. The digest is stored separately from the JSONB payload.
-
-### 3. Accepted records form an append-only hash chain
-
-Each integrity record commits to:
-
-- chain profile and chain name;
-- monotonically increasing chain sequence;
-- event identity and provider timestamp;
-- source Redis Stream ID;
-- canonical payload digest;
-- previous record hash.
-
-The quote row, integrity record, and chain-head update are committed in one
-PostgreSQL transaction. Integrity rows reject updates and deletes.
-
-### 4. Persistence precedes acknowledgement
-
-The history worker acknowledges the Redis Stream message only after the
-PostgreSQL transaction commits. A committed event may therefore be delivered
-again after a process crash, but the quote primary key prevents a second
-history row and a second integrity record.
-
-### 5. Replay verification is independent from replay execution
-
-`smdg-replay` reproduces accepted-event order. `smdg-verify-history` checks that
-stored payloads still match their digests, all links are continuous, sequence
-numbers have no gaps, the persisted head matches the verified chain, and every
-quote-history row has a corresponding integrity record.
-
-Replay verifies integrity by default. Verification and replay read from the same
-read-only `repeatable_read` PostgreSQL snapshot, so replay cannot include a row
-that was committed after the successful verification scan. The explicit
-`--skip-integrity-verification` flag exists for controlled forensic recovery,
-not routine data processing. Feature generation and model training should use
-the same fail-closed default.
-
-### 6. Fail closed on ambiguous history
-
-The verifier raises a hard error for missing payloads, sequence gaps, changed
-payloads, profile changes, broken previous-hash links, a mismatched chain head,
-or incomplete quote-history coverage. It does not silently repair evidence.
-
-## History transaction
+Every accepted-event payload is serialized as sorted canonical JSON and hashed
+with SHA-256. The stored digest uses the profile-prefixed form:
 
 ```text
-accepted Redis event
-  → begin PostgreSQL transaction
-  → insert quote event (idempotent)
-  → lock integrity head
-  → append payload digest + previous hash + record hash
-  → update integrity head
-  → persist finalized candles / late-event audit
-  → commit
-  → Redis XACK
+sha256:<64 lowercase hexadecimal characters>
 ```
 
-Graph calculation, feature generation, prediction, and ML remain outside this
-transaction and outside the quote-delivery hot path.
+The profile is versioned. A profile change must create a new profile identifier;
+it must not silently reinterpret existing records.
 
-## Single history-state owner
+## Append-only integrity chain
 
-Candle construction is stateful. Redis consumer groups may distribute messages
-between consumers, but two independent in-memory candle builders would each see
-only part of an instrument's event sequence and could overwrite one another's
-partial OHLC values.
+Each accepted event receives an integrity record containing:
 
-The history worker therefore holds a session-level PostgreSQL advisory lock for
-its full lifetime. A second worker fails at startup instead of producing
-silently incomplete candles. Symbol partitioning with explicit ownership may
-replace this singleton boundary in a later version, but it must come with
-executable handoff and ordering tests.
+- chain name;
+- monotonic chain sequence;
+- canonicalization profile;
+- event identity and provider timestamp;
+- source stream ID;
+- payload digest;
+- previous record hash;
+- current record hash.
 
-## Retention safety boundary
+The current record hash commits to the record metadata, payload digest, and
+previous hash. The chain head is stored separately and updated in the same
+PostgreSQL transaction as the quote row and integrity record.
 
-Raw quote payloads and their integrity records currently form one verification
-unit. Deleting `quote_events` while preserving `accepted_event_integrity` would
-leave a hash-chain record without the canonical payload needed to recompute its
-digest. The verifier would correctly report `missing quote payload`, and normal
-replay would remain fail-closed.
+The database rejects update and delete operations against integrity records.
+This prevents accidental in-place mutation but does not prevent a privileged
+database administrator from replacing the entire database.
 
-For that reason, market-data retention is currently **disabled even when the
-configuration flag is set**. At startup the history worker removes any existing
-TimescaleDB retention policies and rejects an enabled retention configuration.
-Retention may be enabled only after one of these designs is implemented and
-tested:
+## Transaction boundary
 
-- canonical payloads are retained for every surviving integrity record; or
-- a verifiable truncation/checkpoint protocol defines the first retained chain
-  state and is validated by both `smdg-verify-history` and replay.
+For a new accepted event, one PostgreSQL transaction performs:
 
-A storage-saving policy must never turn retained history into unverifiable
-history.
+1. insert the canonical quote row;
+2. lock the accepted-event chain head;
+3. append the next integrity record;
+4. update the chain head;
+5. update deterministic candle state and late-event audit rows.
 
-## Executable crash matrix
+The transaction commits before the Redis accepted-stream entry is acknowledged.
+A crash before commit leaves no database effects. A crash after commit but
+before acknowledgment causes redelivery; the quote primary key makes the
+transactional database effects idempotent and the existing integrity record is
+not appended twice.
 
-The failpoints are disabled by default. They are enabled only for chaos and CI
-validation through `SMDG_HISTORY_FAILPOINT`.
+## Crash evidence
 
-### `after_ledger_append_before_commit`
+Two stable failpoints are available for integration tests:
 
-Expected and tested result:
+- `after_ledger_append_before_commit`;
+- `after_db_commit_before_ack`.
 
-- quote event rolls back;
-- integrity record rolls back;
-- chain head remains unchanged;
-- Redis event remains unacknowledged;
-- a clean worker can persist the event exactly once.
+The first proves rollback of quote, integrity, and chain-head state before
+commit. The second proves that redelivery after a committed transaction does not
+append a second integrity record or mutate the chain.
 
-### `after_db_commit_before_ack`
+These are deterministic process-crash simulations. They do not certify sudden
+power loss, filesystem barriers, storage-controller caches, or arbitrary cloud
+infrastructure.
 
-Expected and tested result:
+## Verification
 
-- quote event and integrity record remain durable;
-- Redis event remains unacknowledged;
-- redelivery detects the existing quote event;
-- no second chain record is created;
-- the message can then be acknowledged safely.
+`smdg-verify-history` verifies the complete accepted-event chain by default. It
+checks:
 
-The integration suite also changes a stored quote payload deliberately and
-requires `smdg-verify-history` to reject the history.
+- chain sequence continuity;
+- previous-hash continuity;
+- canonical payload digest;
+- record hash;
+- profile identity;
+- quote-row presence for every integrity record;
+- absence of quote rows outside the integrity chain;
+- stored chain-head sequence and hash.
+
+The chain scan, quote count, and chain-head read execute inside one read-only
+`repeatable_read` transaction and use a server-side cursor. Verification
+therefore sees one consistent database snapshot without loading the complete
+chain into process memory.
+
+Replay uses that same transaction and snapshot for verification and event
+iteration. A normal replay cannot include an event that was committed after the
+verified snapshot. The emergency `--skip-integrity-verification` option is
+explicit and must not be the default operational path.
+
+## Retention boundary
+
+Canonical quote payloads and their integrity records must remain available
+together. Deleting quote rows while retaining chain records makes verification
+fail with a missing-payload error. Automated quote and candle retention is
+therefore disabled and any attempt to enable it fails closed until the project
+implements verifiable truncation or integrity-preserving external checkpoints.
+
+A future retention design must define and prove:
+
+- the last retained chain checkpoint;
+- the canonical hash and sequence immediately before the retained window;
+- how verifier and replay authenticate that checkpoint;
+- how checkpoint storage resists rollback and database-wide rewriting;
+- how backup, licensing, and audit requirements interact with deletion.
+
+## Replay relationship
+
+Replay deterministically re-emits the accepted-event envelopes that passed
+integrity verification. Its default Redis output stream is isolated from the
+live accepted-history input, so replay does not silently rebuild or overwrite
+live candles. A future candle rebuild worker must consume an explicitly named
+replay stream and use the same versioned candle rules.
 
 ## Differences from LiminalDB
 
@@ -158,9 +147,17 @@ can construct a new internally consistent history.
 ## Proven and unproven boundaries
 
 This repository now has executable evidence for deterministic hashing, chain
-verification, two important process-crash windows, exactly-once database
-effects under redelivery, one-snapshot verification and replay, singleton candle
-state ownership, and fail-closed replay by default.
+verification, two important process-crash windows, exactly-once transactional
+PostgreSQL database effects under redelivery, one-snapshot verification and
+replay, singleton candle-state ownership, and fail-closed replay by default.
+
+Accepted-event publication itself remains at-least-once. If the processing claim
+expires after `publish_accepted_event` succeeds but before the processed marker
+is written, another consumer may publish a duplicate accepted envelope. The
+history database deduplicates that envelope by event identity, but this PR does
+not prove exactly-once Redis publication. Closing that window requires a
+claim-token fence, lease renewal, or an atomic publication/deduplication
+protocol.
 
 It does not prove sudden-power-loss durability on arbitrary hardware, hostile
 storage correctness, distributed consensus, exchange-grade timestamp precision,
@@ -173,3 +170,4 @@ predictive alpha, or causal truth.
 3. Add real subprocess termination tests in addition to in-process failpoints.
 4. Verify chain checkpoints before replay, feature generation, and model runs.
 5. Design and prove verifiable truncation before enabling raw-data retention.
+6. Fence accepted-event publication with the processing claim token.
