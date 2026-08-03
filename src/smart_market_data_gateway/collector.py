@@ -15,7 +15,6 @@ from smart_market_data_gateway.providers import (
     MarketDataProvider,
     MockMarketDataProvider,
     MockProviderConfig,
-    ProviderState,
     TradernetMode,
     TradernetProviderAdapter,
     TradernetProviderConfig,
@@ -97,17 +96,15 @@ class CollectorService:
 
     async def _apply_control(self, action: str, symbol: str) -> None:
         async with self._provider_lock:
-            health = await self.provider.health()
-            connected = health.state is ProviderState.CONNECTED
             if action == "subscribe":
                 was_new = symbol not in self.active_symbols
                 self.active_symbols.add(symbol)
-                if was_new and connected:
+                if was_new:
                     await self.provider.subscribe([symbol])
             else:
                 was_active = symbol in self.active_symbols
                 self.active_symbols.discard(symbol)
-                if was_active and connected:
+                if was_active:
                     await self.provider.unsubscribe([symbol])
         logger.info(
             "collector control applied",
