@@ -11,6 +11,8 @@ from smart_market_data_gateway.migrations import (
     migration_checksum,
 )
 
+MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
+
 
 def database_url() -> str:
     value = os.getenv("TEST_DATABASE_URL")
@@ -39,11 +41,25 @@ def test_migration_checksum_is_stable() -> None:
     assert migration_checksum("SELECT 1;\n") != migration_checksum("SELECT 2;\n")
 
 
+def test_replay_index_waits_for_prototype_column_upgrade() -> None:
+    foundation = (MIGRATIONS_DIR / "001_temporal_market_foundation.sql").read_text(
+        encoding="utf-8"
+    )
+    upgrade = (MIGRATIONS_DIR / "002_replay_order_columns.sql").read_text(
+        encoding="utf-8"
+    )
+
+    assert "CREATE INDEX IF NOT EXISTS quote_events_replay_order_idx" not in foundation
+    index_offset = upgrade.index("CREATE INDEX IF NOT EXISTS quote_events_replay_order_idx")
+    assert upgrade.index("ADD COLUMN IF NOT EXISTS source_stream_ms") < index_offset
+    assert upgrade.index("ADD COLUMN IF NOT EXISTS source_stream_sequence") < index_offset
+
+
 async def test_authoritative_migration_is_idempotent() -> None:
     connection = await asyncpg.connect(database_url())
     try:
-        first = await apply_migrations(connection, Path("migrations"))
-        second = await apply_migrations(connection, Path("migrations"))
+        first = await apply_migrations(connection, MIGRATIONS_DIR)
+        second = await apply_migrations(connection, MIGRATIONS_DIR)
         assert any(item.version == "001_temporal_market_foundation.sql" for item in first)
         assert all(not item.applied for item in second)
         assert await connection.fetchval(
