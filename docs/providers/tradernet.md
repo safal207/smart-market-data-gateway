@@ -32,9 +32,9 @@ The endpoint is not hard-coded. It can be selected through `SMDG_TRADERNET_WEBSO
 
 | Mode | Purpose | Required values | Behaviour |
 |---|---|---|---|
-| `public_demo` | Public/demo quotes and publishable technical tests | none | Demo `userData` is accepted |
+| `public_demo` | Isolated minimum-symbol technical testing | none | Demo `userData` is accepted |
 | `sid_session` | Closed integration test for an authenticated user | `SMDG_TRADERNET_SID`; optional `SMDG_TRADERNET_USER_ID` | Demo fallback is rejected by default |
-| `api_key` | Future signed API integration | API key and secret | Deliberately raises `NotImplementedError` until the current HMAC canonical-string contract is verified |
+| `api_key` | Future signed API integration | API key and secret | Rejected until the current HMAC canonical-string contract is verified |
 
 No credential is placed in URLs written to logs, reports, fixtures, or benchmark artifacts.
 
@@ -95,9 +95,9 @@ The report verifies delivery before and after reconnect, duplicate event IDs, an
 | `smoke` | 10 | 5 | Contract and connectivity |
 | `medium` | 100–500 | 20 | Aggregation, QoS, latency |
 | `load` | 1,000–10,000 | 20 | Capacity and resource saturation |
-| `legacy-673` | configurable | 673 total provider symbols | Regression for the historical oversized subscription set |
+| `legacy-673` | configurable | 673 total provider symbols | Licensed-only regression for the historical oversized subscription set; requires `--licensing-approved` |
 | `reconnect-storm` | configurable | 5–20 | Simultaneous disconnect/reconnect behaviour |
-| `frozen-stream` | configurable | 5–20 | Pause reads, resume, and verify timestamps advance |
+| `frozen-stream` | configurable | 5–20 | Pause reads, drain buffered backlog, then verify a newer timestamp arrives |
 | `zombie-cleanup` | configurable | 5–20 | Abrupt client loss and subscription cleanup |
 
 Synthetic and deployed measurements must be reported separately. Real-provider artifacts must record the commit SHA, environment, symbol set, market session, account mode, and licensing approval.
@@ -114,7 +114,7 @@ The following remain unknown until written provider/exchange terms are reviewed:
 - publication of raw payloads or provider-backed benchmark results;
 - attribution, geography, device, and user-count obligations.
 
-Until these are resolved, Tradernet is enabled only for isolated technical testing with the minimum symbol set.
+Until these are resolved, Tradernet is enabled only for isolated technical testing with the minimum symbol set. SID-backed publication and the `legacy-673` profile are blocked unless explicit licensing approval is supplied.
 
 ## Reference documentation
 
