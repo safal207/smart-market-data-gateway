@@ -21,11 +21,11 @@ dependencies = [
   "redis>=5.1,<6.0",
   "sqlalchemy>=2.0,<3.0",
   "uvicorn[standard]>=0.32,<1.0",
-  "websockets>=15,<18",
 ]
 
 [project.optional-dependencies]
 dev = [
+  "build>=1.2,<2.0",
   "detect-secrets>=1.5,<2.0",
   "mypy>=1.13,<2.0",
   "pip-audit>=2.7,<3.0",
