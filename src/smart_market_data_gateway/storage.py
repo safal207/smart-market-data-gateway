@@ -79,8 +79,6 @@ class RedisStore:
                 "accepted_at": accepted.quality.accepted_at.isoformat(),
                 "quality_score": str(accepted.quality.score),
             },
-            maxlen=self.settings.accepted_stream_maxlen,
-            approximate=True,
         )
         return str(stream_id)
 
@@ -358,6 +356,8 @@ class RedisStore:
     def _normalize_entries(entries: Any) -> list[StreamMessage]:
         messages: list[StreamMessage] = []
         for stream_id, fields in entries:
+            if stream_id is None or fields is None:
+                continue
             messages.append(
                 (
                     str(stream_id),
