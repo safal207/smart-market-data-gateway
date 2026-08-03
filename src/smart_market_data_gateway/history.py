@@ -371,7 +371,7 @@ class HistorySink:
                     extra={"event": "history_writer_ownership_lost"},
                 )
                 raise
-            except Exception:
+            except Exception as exc:
                 if (
                     self._lock_connection is None
                     or self._lock_connection.is_closed()
@@ -379,7 +379,7 @@ class HistorySink:
                     self._closed = True
                     raise HistoryOwnershipLost(
                         "history writer advisory-lock session was lost"
-                    )
+                    ) from exc
                 logger.exception(
                     "history sink loop failed",
                     extra={"event": "history_sink_failed"},
