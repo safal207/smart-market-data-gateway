@@ -1,7 +1,0 @@
-@import "./styles.css";
-
-/* Modern screen-reader-only clipping; the imported legacy clip remains a compatibility fallback. */
-.visually-hidden {
-  clip: auto !important;
-  clip-path: inset(50%) !important;
-}

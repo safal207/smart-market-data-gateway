@@ -136,6 +136,14 @@ export function saveWorkspace(
   }
 }
 
+/** Saves browser preferences without letting a denied localStorage getter crash the app. */
+export function saveBrowserWorkspace(
+  input: WorkspaceState,
+  key = WORKSPACE_STORAGE_KEY,
+): boolean {
+  return saveWorkspace(browserStorage(), input, key);
+}
+
 export function clearWorkspace(
   storage: WorkspaceStorage | undefined,
   key = WORKSPACE_STORAGE_KEY,

@@ -53,6 +53,7 @@ export {
   WORKSPACE_VERSION,
   clearWorkspace,
   loadWorkspace,
+  saveBrowserWorkspace,
   saveWorkspace,
 } from "./workspace-persistence";
 export type {

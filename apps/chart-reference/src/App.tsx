@@ -20,7 +20,7 @@ import {
   isTimeframe,
   loadWorkspace,
   marketDataAgeMs,
-  saveWorkspace,
+  saveBrowserWorkspace,
   type Candle,
   type MarketDataStoreSnapshot,
   type Timeframe,
@@ -132,7 +132,7 @@ export function App() {
   useEffect(() => { runtime?.store.setTimeframe(timeframe); }, [runtime, timeframe]);
 
   useEffect(() => {
-    saveWorkspace(browserStorage(), {
+    saveBrowserWorkspace({
       ...DEFAULT_WORKSPACE,
       selectedSymbol: symbol,
       timeframe,
@@ -224,14 +224,6 @@ export function App() {
   }), [liveSnapshot, paused, runtime]);
 
   return <ChartWorkspace model={model} actions={actions} />;
-}
-
-function browserStorage(): Storage | undefined {
-  try {
-    return window.localStorage;
-  } catch {
-    return undefined;
-  }
 }
 
 function getReplayFrames(): readonly ReplayFrame[] {
