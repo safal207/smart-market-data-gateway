@@ -1,6 +1,7 @@
 import type { MarketDataPoint, MarketDataSource, SourceStatus, Unsubscribe } from "../market-data";
 import type { SmartSubscriptionManager } from "../market-data/subscription-manager";
 import { CandleAggregator } from "./candle-aggregator";
+import { recordMarketDataObservation } from "./freshness";
 import {
   TemporalIntegrityGuard,
   type IntegrityDecision,
@@ -65,6 +66,8 @@ export class MarketDataStore {
   getSnapshot(): MarketDataStoreSnapshot { return this.snapshot; }
 
   ingest(point: MarketDataPoint): IntegrityDecision {
+    const observedAtMs = Date.now();
+    recordMarketDataObservation(point, observedAtMs);
     const decision = this.integrityGuard.evaluate(point);
     const symbol = point.quote.symbol.trim().toUpperCase();
     if (decision.outcome === "accepted") {
@@ -93,7 +96,9 @@ export class MarketDataStore {
         }
       }
       if (latest != null && latest.quote.eventId === point.quote.eventId && point.generation >= latest.generation) {
-        this.latestBySymbol.set(symbol, Object.freeze({ ...point, quote: latest.quote }));
+        const refreshed = Object.freeze({ ...point, quote: latest.quote });
+        recordMarketDataObservation(refreshed, observedAtMs);
+        this.latestBySymbol.set(symbol, refreshed);
       }
       this.publish();
     } else {
