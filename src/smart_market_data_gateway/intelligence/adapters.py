@@ -34,9 +34,12 @@ def quote_event_to_observations(
 
     evidence_ref = EvidenceRef(
         provenance_system="smart-market-data-gateway",
-        provenance_component=event.provider,
+        provenance_component=(
+            "websocket-jsonl-recorder" if record_hash is not None else "quote-event-normalizer"
+        ),
         locator=f"quote-event:{event.event_id}",
         observed_at=event.provider_timestamp,
+        received_at=event.received_at,
         record_hash=record_hash,
         ledger_index=ledger_index,
     )
@@ -44,6 +47,7 @@ def quote_event_to_observations(
     quote_metrics: dict[str, MetricValue] = {
         "schema_version": event.schema_version,
         "price": event.price,
+        "provider": event.provider,
         "stale": stale,
         "age_ms": age_ms,
     }
