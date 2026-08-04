@@ -1,10 +1,17 @@
+import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
+import logging
+import time
 from typing import Annotated
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
 
+from smart_market_data_gateway.candle_archive import (
+    HybridCandleHistoryStore,
+    PostgresCandleArchive,
+)
 from smart_market_data_gateway.candles import CandleSeries, CandleTimeframe
 from smart_market_data_gateway.domain import ClientIdentity
 from smart_market_data_gateway.security import AuthorizationError, AuthorizationService
@@ -12,6 +19,8 @@ from smart_market_data_gateway.security import AuthorizationError, Authorization
 GetIdentity = Callable[..., Awaitable[ClientIdentity]]
 EnforceRestLimit = Callable[[Request, ClientIdentity], Awaitable[None]]
 SymbolPath = Annotated[str, Path(pattern=r"^[A-Za-z0-9._:-]{1,32}$")]
+_ARCHIVE_RETRY_SECONDS = 30.0
+logger = logging.getLogger(__name__)
 
 
 def create_candle_router(
@@ -64,6 +73,7 @@ def create_candle_router(
                     detail="end must not be in the future",
                 )
 
+        await _ensure_archive_reader(request)
         series: CandleSeries = await request.app.state.candle_history.get_candles(
             normalized,
             timeframe=timeframe,
@@ -85,3 +95,50 @@ def create_candle_router(
         return series
 
     return router
+
+
+async def _ensure_archive_reader(request: Request) -> None:
+    state = request.app.state
+    config = state.store.settings
+    archive = state.candle_archive
+    if not config.candle_archive_enabled or not config.database_url:
+        return
+    if archive is not None and archive.available:
+        return
+
+    now = time.monotonic()
+    if now < float(getattr(state, "candle_archive_retry_at", 0.0)):
+        return
+    lock = getattr(state, "candle_archive_retry_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        state.candle_archive_retry_lock = lock
+
+    async with lock:
+        archive = state.candle_archive
+        if archive is not None and archive.available:
+            return
+        now = time.monotonic()
+        if now < float(getattr(state, "candle_archive_retry_at", 0.0)):
+            return
+
+        candidate = PostgresCandleArchive(config)
+        try:
+            await candidate.start()
+        except Exception:
+            await candidate.close()
+            state.candle_archive_retry_at = time.monotonic() + _ARCHIVE_RETRY_SECONDS
+            logger.warning(
+                "Candle archive reconnect failed; retaining Redis hot history",
+                extra={"event": "candle_archive_reconnect_failed"},
+                exc_info=True,
+            )
+            return
+
+        state.candle_archive = candidate
+        state.candle_history = HybridCandleHistoryStore(state.store, candidate, config)
+        state.candle_archive_retry_at = 0.0
+        logger.info(
+            "Candle archive reader reconnected",
+            extra={"event": "candle_archive_reconnected"},
+        )
