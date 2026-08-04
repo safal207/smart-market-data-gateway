@@ -141,6 +141,31 @@ async def test_archive_worker_dead_letters_only_repeated_invalid_payloads(
     await sink.close()
 
 
+async def test_archive_worker_advances_the_autoclaim_scan_cursor(test_settings) -> None:
+    fake_redis = CursorRedis()
+    sink = object.__new__(RecoveringCandleArchiveSink)
+    sink.redis = fake_redis
+    sink.config = test_settings
+    sink.consumer_name = "cursor-test"
+    sink._claim_cursor = "0-0"
+
+    assert await sink._claim_stale() == []
+    assert sink._claim_cursor == "500-0"
+    assert await sink._claim_stale() == []
+    assert sink._claim_cursor == "0-0"
+    assert fake_redis.start_ids == ["0-0", "500-0"]
+
+
+class CursorRedis:
+    def __init__(self) -> None:
+        self.start_ids: list[str] = []
+        self.responses = iter((("500-0", []), ("0-0", [])))
+
+    async def xautoclaim(self, *args, **kwargs):
+        self.start_ids.append(str(kwargs["start_id"]))
+        return next(self.responses)
+
+
 async def pending(redis_client, config) -> list[dict[str, object]]:
     return await redis_client.xpending_range(
         config.quote_stream,
