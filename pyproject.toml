@@ -39,7 +39,6 @@ dev = [
 
 [project.scripts]
 smdg-benchmark = "smart_market_data_gateway.benchmark:main"
-smdg-candle-archive = "smart_market_data_gateway.candle_archive:main"
 smdg-collector = "smart_market_data_gateway.collector:main"
 smdg-usage-sink = "smart_market_data_gateway.usage_sink:main"
 
