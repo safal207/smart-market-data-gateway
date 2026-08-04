@@ -145,8 +145,6 @@ class PredictionLedger:
         evidence: tuple[EvidenceRef, ...],
     ) -> LedgerEntry:
         self._require_timezone(occurred_at)
-        if self._entries and occurred_at < self._entries[-1].occurred_at:
-            raise ValueError("ledger append time must be monotonic")
         if to_state not in _ALLOWED_TRANSITIONS[from_state]:
             raise ValueError(f"illegal hypothesis transition: {from_state} -> {to_state}")
 
@@ -163,7 +161,14 @@ class PredictionLedger:
             previous_record_hash=previous_record_hash,
         )
         entry = LedgerEntry(
-            **payload,
+            ledger_index=ledger_index,
+            hypothesis_id=hypothesis_id,
+            from_state=from_state,
+            to_state=to_state,
+            occurred_at=occurred_at,
+            reason=reason,
+            evidence=evidence,
+            previous_record_hash=previous_record_hash,
             record_hash=_hash_payload(payload),
         )
         self._entries.append(entry)
@@ -180,21 +185,22 @@ def verify_ledger_entries(entries: Iterable[LedgerEntry]) -> None:
 
     previous_record_hash = GENESIS_HASH
     states: dict[UUID, HypothesisState] = {}
-    previous_occurred_at: datetime | None = None
+    latest_times: dict[UUID, datetime] = {}
 
     for expected_index, entry in enumerate(entries):
         if entry.ledger_index != expected_index:
             raise ValueError(f"ledger index mismatch at position {expected_index}")
         if entry.previous_record_hash != previous_record_hash:
             raise ValueError(f"ledger chain mismatch at index {expected_index}")
-        if previous_occurred_at is not None and entry.occurred_at < previous_occurred_at:
-            raise ValueError(f"ledger time regression at index {expected_index}")
 
         expected_from_state = states.get(entry.hypothesis_id, HypothesisState.NO_SIGNAL)
         if entry.from_state is not expected_from_state:
             raise ValueError(f"state-chain mismatch at index {expected_index}")
         if entry.to_state not in _ALLOWED_TRANSITIONS[entry.from_state]:
             raise ValueError(f"illegal transition at index {expected_index}")
+        prior_time = latest_times.get(entry.hypothesis_id)
+        if prior_time is not None and entry.occurred_at < prior_time:
+            raise ValueError(f"hypothesis time regression at index {expected_index}")
         if (
             entry.to_state in {HypothesisState.CONFIRMED, HypothesisState.INVALIDATED}
             and not entry.evidence
@@ -215,8 +221,8 @@ def verify_ledger_entries(entries: Iterable[LedgerEntry]) -> None:
             raise ValueError(f"record hash mismatch at index {expected_index}")
 
         states[entry.hypothesis_id] = entry.to_state
+        latest_times[entry.hypothesis_id] = entry.occurred_at
         previous_record_hash = entry.record_hash
-        previous_occurred_at = entry.occurred_at
 
 
 def _entry_payload(
