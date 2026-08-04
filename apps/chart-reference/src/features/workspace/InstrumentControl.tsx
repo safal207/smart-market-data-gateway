@@ -82,6 +82,8 @@ export function InstrumentControl({
         <select
           id="timeframe"
           value={timeframe}
+          disabled={paused}
+          aria-describedby={paused ? "timeframe-paused-hint" : undefined}
           onChange={(event) => onSelectTimeframe(event.currentTarget.value)}
         >
           {timeframeOptions.map((option) => (
@@ -90,6 +92,11 @@ export function InstrumentControl({
             </option>
           ))}
         </select>
+        {paused ? (
+          <p id="timeframe-paused-hint" className="field-hint">
+            Resume the display before changing timeframe.
+          </p>
+        ) : null}
       </div>
 
       <button
