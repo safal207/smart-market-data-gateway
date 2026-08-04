@@ -148,7 +148,7 @@ export class CandleHistoryClient implements CandleHistoryTransport {
       throw new RangeError("limit must be an integer between 1 and 1000");
     }
 
-    const url = new URL(`/v1/candles/${encodeURIComponent(symbol)}`, this.baseUrl);
+    const url = new URL(`v1/candles/${encodeURIComponent(symbol)}`, this.baseUrl);
     url.searchParams.set("timeframe", request.timeframe);
     url.searchParams.set("limit", String(limit));
     const headers = new Headers({ Accept: "application/json" });
@@ -268,7 +268,7 @@ export function gatewayHttpBaseUrl(): string {
 
 function normalizedBaseUrl(value: string): string {
   const url = new URL(value, typeof window === "undefined" ? "http://localhost" : window.location.origin);
-  url.pathname = url.pathname.replace(/\/+$/, "") || "/";
+  url.pathname = `${url.pathname.replace(/\/+$/, "")}/`;
   return url.toString();
 }
 
