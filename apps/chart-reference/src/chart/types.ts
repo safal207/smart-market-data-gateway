@@ -34,5 +34,6 @@ export type ChartRendererFactory = () => ChartRenderer;
 export function activityLabel(candles: readonly ChartCandle[]): "Volume" | "Updates" | "Activity" {
   const sources = new Set(candles.map((candle) => candle.activitySource));
   if (sources.size !== 1) return "Activity";
-  return sources.has("volume") ? "Volume" : "Updates";
+  if (sources.has("volume")) return "Volume";
+  return sources.has("updates") ? "Updates" : "Activity";
 }
