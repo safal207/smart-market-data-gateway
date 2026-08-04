@@ -89,6 +89,21 @@ describe("App", () => {
     view.unmount();
   });
 
+  it("boots when browser storage access is denied", async () => {
+    const storageGetter = vi.spyOn(window, "localStorage", "get").mockImplementation(() => {
+      throw new DOMException("Storage access denied", "SecurityError");
+    });
+
+    try {
+      render(<App />);
+      await waitFor(() =>
+        expect(screen.getByRole("status")).toHaveTextContent("Synthetic replay"),
+      );
+    } finally {
+      storageGetter.mockRestore();
+    }
+  });
+
   it("marks a live gateway quote stale when the freshness watchdog advances without frames", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-02T12:00:00.000Z"));
