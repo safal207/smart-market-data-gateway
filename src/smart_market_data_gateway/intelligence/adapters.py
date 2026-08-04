@@ -1,5 +1,8 @@
+import hashlib
+import json
 from datetime import datetime
 from decimal import Decimal
+from uuid import UUID
 
 from smart_market_data_gateway.domain.models import QuoteEvent
 from smart_market_data_gateway.intelligence.models import (
@@ -20,11 +23,12 @@ def quote_event_to_observations(
     expires_at: datetime | None = None,
     generation: int | None = None,
 ) -> tuple[MarketObservation, ...]:
-    """Translate one normalized QuoteEvent into typed TMI observations.
+    """Translate one normalized QuoteEvent into deterministic TMI observations.
 
     The adapter preserves provider semantics and never fabricates unsupported
     evidence. Rich observations are emitted only when the corresponding values
-    exist on the validated QuoteEvent.
+    exist on the validated QuoteEvent. Repeating the exact same adaptation input
+    produces the same observation IDs, so recorder replay is idempotent.
     """
 
     if age_ms < 0:
@@ -61,6 +65,10 @@ def quote_event_to_observations(
             kind=ObservationKind.QUOTE,
             fact=f"{event.symbol} quote observed at {event.price}",
             metrics=quote_metrics,
+            record_hash=record_hash,
+            ledger_index=ledger_index,
+            stale=stale,
+            age_ms=age_ms,
             expires_at=expires_at,
             generation=generation,
         )
@@ -78,6 +86,10 @@ def quote_event_to_observations(
                 kind=ObservationKind.VOLUME,
                 fact=f"{event.symbol} volume evidence observed",
                 metrics=volume_metrics,
+                record_hash=record_hash,
+                ledger_index=ledger_index,
+                stale=stale,
+                age_ms=age_ms,
                 expires_at=expires_at,
                 generation=generation,
             )
@@ -97,6 +109,10 @@ def quote_event_to_observations(
                 kind=ObservationKind.AGGRESSOR_FLOW,
                 fact=f"{event.symbol} aggressor-flow evidence observed",
                 metrics=flow_metrics,
+                record_hash=record_hash,
+                ledger_index=ledger_index,
+                stale=stale,
+                age_ms=age_ms,
                 expires_at=expires_at,
                 generation=generation,
             )
@@ -124,6 +140,10 @@ def quote_event_to_observations(
                 kind=ObservationKind.TOP_OF_BOOK_DEPTH,
                 fact=f"{event.symbol} top-of-book depth observed",
                 metrics=depth_metrics,
+                record_hash=record_hash,
+                ledger_index=ledger_index,
+                stale=stale,
+                age_ms=age_ms,
                 expires_at=expires_at,
                 generation=generation,
             )
@@ -139,10 +159,24 @@ def _observation(
     kind: ObservationKind,
     fact: str,
     metrics: dict[str, MetricValue],
+    record_hash: str | None,
+    ledger_index: int | None,
+    stale: bool,
+    age_ms: int,
     expires_at: datetime | None,
     generation: int | None,
 ) -> MarketObservation:
     return MarketObservation(
+        observation_id=_deterministic_observation_id(
+            event=event,
+            kind=kind,
+            record_hash=record_hash,
+            ledger_index=ledger_index,
+            stale=stale,
+            age_ms=age_ms,
+            expires_at=expires_at,
+            generation=generation,
+        ),
         symbol=event.symbol,
         kind=kind,
         observed_at=event.provider_timestamp,
@@ -155,6 +189,37 @@ def _observation(
         expires_at=expires_at,
         generation=generation,
     )
+
+
+def _deterministic_observation_id(
+    *,
+    event: QuoteEvent,
+    kind: ObservationKind,
+    record_hash: str | None,
+    ledger_index: int | None,
+    stale: bool,
+    age_ms: int,
+    expires_at: datetime | None,
+    generation: int | None,
+) -> UUID:
+    payload = {
+        "adapter_contract": "tmi-quote-observation-v1",
+        "event": event.model_dump(mode="json"),
+        "kind": kind.value,
+        "record_hash": record_hash,
+        "ledger_index": ledger_index,
+        "stale": stale,
+        "age_ms": age_ms,
+        "expires_at": expires_at.isoformat() if expires_at is not None else None,
+        "generation": generation,
+    }
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return UUID(bytes=hashlib.sha256(canonical).digest()[:16], version=5)
 
 
 def _add_volume_semantics(metrics: dict[str, MetricValue], event: QuoteEvent) -> None:
