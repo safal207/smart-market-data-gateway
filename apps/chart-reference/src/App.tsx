@@ -132,7 +132,7 @@ export function App() {
   useEffect(() => { runtime?.store.setTimeframe(timeframe); }, [runtime, timeframe]);
 
   useEffect(() => {
-    saveWorkspace(window.localStorage, {
+    saveWorkspace(browserStorage(), {
       ...DEFAULT_WORKSPACE,
       selectedSymbol: symbol,
       timeframe,
@@ -224,6 +224,14 @@ export function App() {
   }), [liveSnapshot, paused, runtime]);
 
   return <ChartWorkspace model={model} actions={actions} />;
+}
+
+function browserStorage(): Storage | undefined {
+  try {
+    return window.localStorage;
+  } catch {
+    return undefined;
+  }
 }
 
 function getReplayFrames(): readonly ReplayFrame[] {
