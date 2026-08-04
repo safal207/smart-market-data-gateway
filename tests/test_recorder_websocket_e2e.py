@@ -31,7 +31,7 @@ async def _wait_until_started(server: Server, timeout_seconds: float = 5.0) -> N
 
 
 @pytest.mark.asyncio
-async def test_records_real_gateway_websocket_session_to_verified_ledger(
+async def test_records_real_gateway_websocket_session_to_verified_rich_ledger(
     tmp_path: Path,
     redis_client: Redis,
     test_settings: Settings,
@@ -94,3 +94,22 @@ async def test_records_real_gateway_websocket_session_to_verified_ledger(
     assert {row["symbol"] for row in rows} == {"AAPL", "TSLA"}
     assert all(row["source_message_type"] == "quote" for row in rows)
     assert all(row["provenance_transport"] == "websocket" for row in rows)
+
+    assert all(row["schema_version"] == "1.1" for row in rows)
+    assert all("volume" in row and float(row["volume"]) >= 0 for row in rows)
+    assert all("buy_volume" in row and "sell_volume" in row for row in rows)
+    assert all("bid_depth" in row and "ask_depth" in row for row in rows)
+    assert all(row["trade_count"] >= 0 for row in rows)
+    assert all(row["volume_semantics"]["unit"] == "base_asset" for row in rows)
+    assert all(row["volume_semantics"]["aggregation_window_ms"] == 10 for row in rows)
+    assert all(row["depth_semantics"]["levels"] == 1 for row in rows)
+    assert all(
+        {
+            "level1_quote",
+            "volume",
+            "aggressor_flow",
+            "trade_count",
+            "top_of_book_depth",
+        }.issubset(set(row["capabilities"]))
+        for row in rows
+    )
