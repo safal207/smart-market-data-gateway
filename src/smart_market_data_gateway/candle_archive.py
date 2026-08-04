@@ -74,18 +74,7 @@ INSERT INTO candle_archive_1m (
     first_event_id,
     last_event_id
 )
-SELECT
-    $3,
-    $4,
-    $5,
-    $5,
-    $5,
-    $5,
-    1,
-    $2,
-    $2,
-    $1,
-    $1
+SELECT $3, $4, $5, $5, $5, $5, 1, $2, $2, $1, $1
 FROM accepted
 ON CONFLICT (symbol, open_time) DO UPDATE SET
     open = CASE
@@ -367,29 +356,8 @@ class HybridCandleHistoryStore:
                 end=end,
             )
         )
-
-        hot_series: CandleSeries | None = None
-        archive_series: CandleSeries | None = None
-        hot_error: Exception | None = None
-        archive_error: Exception | None = None
-        try:
-            hot_series = await hot_task
-        except Exception as exc:
-            hot_error = exc
-            logger.warning(
-                "Redis hot candle read failed",
-                extra={"event": "candle_hot_read_failed", "symbol": symbol},
-                exc_info=True,
-            )
-        try:
-            archive_series = await archive_task
-        except Exception as exc:
-            archive_error = exc
-            logger.warning(
-                "Candle archive read failed; retaining Redis hot-layer availability",
-                extra={"event": "candle_archive_read_failed", "symbol": symbol},
-                exc_info=True,
-            )
+        hot_series, hot_error = await _capture_series(hot_task, "hot", symbol)
+        archive_series, archive_error = await _capture_series(archive_task, "archive", symbol)
 
         if hot_series is None and archive_series is None:
             raise hot_error or archive_error or RuntimeError("all candle history stores failed")
@@ -440,7 +408,7 @@ class HybridCandleHistoryStore:
 
 
 class CandleArchiveSink:
-    """Consumes an independent Redis event stream and archives quotes without blocking delivery."""
+    """Consumes the quote stream in an independent group without blocking live delivery."""
 
     def __init__(self, redis: Redis, config: Settings) -> None:
         if not config.candle_archive_enabled:
@@ -456,7 +424,7 @@ class CandleArchiveSink:
         await self.archive.start()
         try:
             await self.redis.xgroup_create(
-                self.config.candle_archive_stream,
+                self.config.quote_stream,
                 self.config.candle_archive_group,
                 id="0",
                 mkstream=True,
@@ -471,7 +439,7 @@ class CandleArchiveSink:
         while not self._closed:
             try:
                 messages = await self.store.read_group(
-                    self.config.candle_archive_stream,
+                    self.config.quote_stream,
                     self.config.candle_archive_group,
                     self.consumer_name,
                     count=200,
@@ -493,23 +461,23 @@ class CandleArchiveSink:
             event = QuoteEvent.model_validate_json(fields["payload"])
             await self.archive.persist_event(event)
             await self.store.ack(
-                self.config.candle_archive_stream,
+                self.config.quote_stream,
                 self.config.candle_archive_group,
                 stream_id,
             )
         except Exception as exc:
-            retry_key = f"archive:{self.config.candle_archive_stream}:{stream_id}"
+            retry_key = f"archive:{self.config.quote_stream}:{stream_id}"
             retry_count = await self.store.increment_retry(retry_key)
             if retry_count >= self.config.retry_limit:
                 await self.store.move_to_dead_letter(
-                    source_stream=self.config.candle_archive_stream,
+                    source_stream=self.config.quote_stream,
                     stream_id=stream_id,
                     payload=fields,
                     error=str(exc),
                     retry_count=retry_count,
                 )
                 await self.store.ack(
-                    self.config.candle_archive_stream,
+                    self.config.quote_stream,
                     self.config.candle_archive_group,
                     stream_id,
                 )
@@ -519,6 +487,22 @@ class CandleArchiveSink:
     async def close(self) -> None:
         self._closed = True
         await self.archive.close()
+
+
+async def _capture_series(
+    task: asyncio.Task[CandleSeries],
+    layer: str,
+    symbol: str,
+) -> tuple[CandleSeries | None, Exception | None]:
+    try:
+        return await task, None
+    except Exception as exc:
+        logger.warning(
+            "Candle history layer failed",
+            extra={"event": "candle_history_layer_failed", "layer": layer, "symbol": symbol},
+            exc_info=True,
+        )
+        return None, exc
 
 
 def _ceil_timeframe(value: datetime, timeframe: CandleTimeframe) -> datetime:
