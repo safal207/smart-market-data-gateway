@@ -2,6 +2,7 @@ import hashlib
 import json
 from collections.abc import Iterable
 from datetime import datetime
+from enum import StrEnum
 from uuid import UUID
 
 from smart_market_data_gateway.intelligence.models import (
@@ -265,6 +266,3 @@ def _jsonable(value: object) -> object:
     if isinstance(value, dict):
         return {str(key): _jsonable(item) for key, item in value.items()}
     return value
-
-
-from enum import StrEnum  # noqa: E402  # kept local to avoid widening the public surface
