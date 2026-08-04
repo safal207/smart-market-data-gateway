@@ -21,7 +21,7 @@ Use a Pro or Premium development token such as `dev-pro:chart-reference` to load
 
 ## History and live-data stitching
 
-1. The workspace requests up to 500 fully closed canonical candles for the selected symbol and timeframe.
+1. For server-supported timeframes, the workspace requests up to 500 fully closed canonical candles for the selected symbol and timeframe.
 2. The bearer token is sent only in the `Authorization` header and remains in React memory.
 3. The HTTP response is validated against the public candle contract before it can reach the chart.
 4. Server candles are authoritative through the latest returned closed bucket.
@@ -38,7 +38,7 @@ Use a Pro or Premium development token such as `dev-pro:chart-reference` to load
 - Gateway tokens are held in React memory and are never written to local storage or placed in REST URLs.
 - Only symbol, timeframe, and theme preferences are persisted.
 - Replay mode aggregates candles entirely in the browser.
-- Gateway mode bootstraps canonical closed history from the server and builds only the current live tail in the browser.
+- For server-supported timeframes, Gateway mode bootstraps canonical closed history from the server and builds only the current live tail in the browser.
 - Server-history loading, entitlement, empty, and failure states are independent from the WebSocket connection state.
 - The application is display-only and does not place orders or provide investment advice.
 
