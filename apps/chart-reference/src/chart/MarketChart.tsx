@@ -59,6 +59,10 @@ export function MarketChart({
   precisionRef.current = precision;
 
   useEffect(() => {
+    setCrosshair(null);
+  }, [symbol, timeframeLabel]);
+
+  useEffect(() => {
     const container = containerRef.current;
     if (container == null) return undefined;
     const renderer = rendererFactory();
