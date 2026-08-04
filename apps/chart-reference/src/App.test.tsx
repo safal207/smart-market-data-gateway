@@ -5,11 +5,26 @@ import { App } from "./App";
 import { wireQuote } from "./test/market-data-fixtures";
 
 vi.mock("./chart", () => ({
-  MarketChart: ({ symbol, timeframeLabel }: { symbol: string; timeframeLabel: string }) => (
-      <section aria-label="Market chart test double">
-        <h2>{`${symbol} · ${timeframeLabel}`}</h2>
-      </section>
+  MarketChart: ({
+    symbol,
+    timeframeLabel,
+  }: {
+    symbol: string;
+    timeframeLabel: string;
+  }) => (
+    <section aria-label="Market chart test double">
+      <h2>{`${symbol} · ${timeframeLabel}`}</h2>
+    </section>
   ),
+  activityLabel: (
+    candles: readonly {
+      activitySource: "volume" | "updates" | "mixed";
+    }[],
+  ) => {
+    const sources = new Set(candles.map((candle) => candle.activitySource));
+    if (sources.size !== 1) return "Activity";
+    return sources.has("volume") ? "Volume" : "Updates";
+  },
 }));
 
 class AppTestSocket {
@@ -60,7 +75,9 @@ describe("App", () => {
   it("boots the synthetic replay and persists preferences without credentials", async () => {
     const view = render(<App />);
 
-    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Synthetic replay"));
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent("Synthetic replay"),
+    );
     await waitFor(() => expect(screen.getByText("synthetic-replay")).toBeVisible());
 
     const stored = window.localStorage.getItem("smdg.chart-reference.workspace");
