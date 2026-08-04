@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -6,10 +6,19 @@ import { ChartWorkspace } from "./ChartWorkspace";
 import type { ChartWorkspaceActions, ChartWorkspaceModel } from "./types";
 
 vi.mock("../../chart", () => ({
-  MarketChart: ({ symbol, timeframeLabel }: { symbol: string; timeframeLabel: string }) => (
-      <section aria-label="Market chart test double">
-        <h2>{`${symbol} · ${timeframeLabel}`}</h2>
-      </section>
+  MarketChart: ({
+    symbol,
+    timeframeLabel,
+    emptyMessage,
+  }: {
+    symbol: string;
+    timeframeLabel: string;
+    emptyMessage?: string;
+  }) => (
+    <section aria-label="Market chart test double">
+      <h2>{`${symbol} · ${timeframeLabel}`}</h2>
+      {emptyMessage == null ? null : <p>{emptyMessage}</p>}
+    </section>
   ),
 }));
 
@@ -72,7 +81,10 @@ function actions(): ChartWorkspaceActions {
   };
 }
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
 
 describe("ChartWorkspace", () => {
   it("renders semantic quote, connection, summary, and attribution content", () => {
@@ -127,5 +139,37 @@ describe("ChartWorkspace", () => {
     expect(handlers.setGatewayToken).toHaveBeenLastCalledWith("replacement-token");
     await user.click(screen.getByRole("button", { name: "Connect with token" }));
     expect(handlers.reconnect).toHaveBeenCalledOnce();
+  });
+
+  it("does not claim Live before the first gateway quote and times out to No data", () => {
+    vi.useFakeTimers();
+    render(
+      <ChartWorkspace
+        model={{
+          ...model,
+          sourceMode: "gateway",
+          connectionState: "live",
+          connectionDetail: "Socket opened.",
+          lastUpdateMs: undefined,
+          quote: null,
+          candles: [],
+        }}
+        actions={actions()}
+      />,
+    );
+
+    expect(screen.getByRole("status")).toHaveTextContent("Connecting");
+    expect(screen.getByText("Waiting for market data…")).toBeVisible();
+    expect(screen.queryByText(/^Live$/)).not.toBeInTheDocument();
+
+    act(() => {
+      vi.advanceTimersByTime(5_000);
+    });
+
+    expect(screen.getByRole("status")).toHaveTextContent("No data");
+    expect(
+      screen.getByText("No market data is available for this instrument and timeframe."),
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "Reconnect" })).toBeVisible();
   });
 });
