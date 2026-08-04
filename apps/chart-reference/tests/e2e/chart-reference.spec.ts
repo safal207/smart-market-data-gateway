@@ -98,7 +98,7 @@ test("an open gateway socket without quotes never claims Live", async ({ page })
 
   await page.goto("/?source=gateway");
   await expect(page.getByRole("status")).toContainText("Connecting");
-  await expect(page.getByText("Waiting for market data…")).toBeVisible();
+  await expect(page.getByText("Waiting for market data…")).toHaveCount(2);
   await expect(page.getByRole("status")).not.toContainText("Live");
 
   await expect(page.getByRole("status")).toContainText("No data", { timeout: 7_000 });
