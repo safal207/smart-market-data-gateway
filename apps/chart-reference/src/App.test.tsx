@@ -138,6 +138,65 @@ describe("App", () => {
     expect(screen.getByRole("status")).toHaveTextContent("Stale");
   });
 
+  it("keeps paused incoming data aged so resume cannot briefly restore Live", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-02T12:00:00.000Z"));
+    vi.stubGlobal("WebSocket", AppTestSocket);
+    window.history.replaceState(null, "", "/?source=gateway");
+    render(<App />);
+    await act(async () => Promise.resolve());
+    const socket = AppTestSocket.instances[0];
+    expect(socket).toBeDefined();
+
+    act(() => socket?.open());
+    const firstTimestamp = new Date(Date.now()).toISOString();
+    act(() => {
+      socket?.message({
+        type: "quote",
+        timestamp: firstTimestamp,
+        request_id: null,
+        data: {
+          quote: {
+            ...wireQuote(),
+            provider_timestamp: firstTimestamp,
+            received_at: firstTimestamp,
+          },
+        },
+      });
+    });
+    expect(screen.getByRole("status")).toHaveTextContent("Live");
+    fireEvent.click(screen.getByRole("button", { name: "Pause display" }));
+    expect(screen.getByRole("status")).toHaveTextContent("Paused");
+
+    act(() => {
+      vi.advanceTimersByTime(1_000);
+    });
+    const pausedTimestamp = new Date(Date.now()).toISOString();
+    act(() => {
+      socket?.message({
+        type: "quote",
+        timestamp: pausedTimestamp,
+        request_id: null,
+        data: {
+          quote: {
+            ...wireQuote(),
+            event_id: "00000000-0000-4000-8000-000000000002",
+            sequence: 2,
+            provider_timestamp: pausedTimestamp,
+            received_at: pausedTimestamp,
+          },
+        },
+      });
+    });
+    act(() => {
+      vi.advanceTimersByTime(6_000);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Resume display" }));
+    expect(screen.getByRole("status")).toHaveTextContent("Stale");
+    expect(screen.getByRole("status")).not.toHaveTextContent("Live");
+  });
+
   it("requires a quote from the new generation after reconnect", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-02T12:00:00.000Z"));
