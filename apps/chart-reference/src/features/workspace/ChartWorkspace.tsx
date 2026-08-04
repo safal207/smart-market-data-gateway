@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import { MarketChart } from "../../chart";
 import { ConnectionStatus } from "./ConnectionStatus";
+import { HistoryStatus } from "./HistoryStatus";
 import { InstrumentControl } from "./InstrumentControl";
 import { MarketDataSummary } from "./MarketDataSummary";
 import { QuoteStrip } from "./QuoteStrip";
@@ -93,6 +94,7 @@ export function ChartWorkspace({ model, actions }: ChartWorkspaceProps) {
             lastUpdateMs={model.lastUpdateMs}
             onReconnect={actions.reconnect}
           />
+          {model.history == null ? null : <HistoryStatus history={model.history} />}
           <QuoteStrip quote={model.quote} precision={model.precision} />
           <MarketDataSummary
             latest={model.candles.at(-1) ?? null}
