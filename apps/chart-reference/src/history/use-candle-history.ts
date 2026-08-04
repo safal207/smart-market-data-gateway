@@ -39,6 +39,8 @@ export interface UseCandleHistoryOptions {
   readonly limit?: number;
 }
 
+export const HISTORY_TOKEN_SETTLE_MS = 400;
+
 const DISABLED: CandleHistorySnapshot = Object.freeze({
   state: "disabled",
   candles: Object.freeze([]),
@@ -53,6 +55,7 @@ export function useCandleHistory(options: UseCandleHistoryOptions): CandleHistor
     new CandleHistoryClient({ baseUrl: gatewayHttpBaseUrl() }),
   );
   const [snapshot, setSnapshot] = useState<CandleHistorySnapshot>(DISABLED);
+  const settledToken = useDebouncedValue(options.token, HISTORY_TOKEN_SETTLE_MS);
 
   useEffect(() => {
     const loader = loaderRef.current;
@@ -84,7 +87,7 @@ export function useCandleHistory(options: UseCandleHistoryOptions): CandleHistor
     void loader.load({
       symbol: options.symbol,
       timeframe: options.timeframe,
-      token: options.token,
+      token: settledToken,
       limit: options.limit ?? 500,
     }).then((outcome) => {
       if (outcome.kind === "superseded") return;
@@ -112,10 +115,21 @@ export function useCandleHistory(options: UseCandleHistoryOptions): CandleHistor
     options.reloadRevision,
     options.symbol,
     options.timeframe,
-    options.token,
+    settledToken,
   ]);
 
   return snapshot;
+}
+
+export function useDebouncedValue<T>(value: T, delayMs: number): T {
+  const [debounced, setDebounced] = useState(value);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebounced(value), delayMs);
+    return () => window.clearTimeout(timer);
+  }, [delayMs, value]);
+
+  return debounced;
 }
 
 function failureSnapshot(kind: CandleHistoryFailureKind, message: string): CandleHistorySnapshot {
