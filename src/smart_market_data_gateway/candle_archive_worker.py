@@ -7,7 +7,7 @@ from pydantic import ValidationError
 from redis.asyncio import Redis
 
 from smart_market_data_gateway.candle_archive import CandleArchiveSink
-from smart_market_data_gateway.config import settings
+from smart_market_data_gateway.config import Settings, settings
 from smart_market_data_gateway.domain import QuoteEvent
 from smart_market_data_gateway.logging import configure_logging
 
@@ -16,6 +16,10 @@ logger = logging.getLogger(__name__)
 
 class RecoveringCandleArchiveSink(CandleArchiveSink):
     """Archive worker that reclaims abandoned deliveries without losing transient failures."""
+
+    def __init__(self, redis: Redis, config: Settings) -> None:
+        super().__init__(redis, config)
+        self._claim_cursor = "0-0"
 
     async def run(self) -> None:
         if not self.archive.available:
@@ -49,10 +53,14 @@ class RecoveringCandleArchiveSink(CandleArchiveSink):
             self.config.candle_archive_group,
             self.consumer_name,
             min_idle_time=self.config.candle_archive_claim_idle_ms,
-            start_id="0-0",
+            start_id=self._claim_cursor,
             count=200,
         )
-        entries = claimed[1] if isinstance(claimed, (list, tuple)) and len(claimed) > 1 else []
+        if not isinstance(claimed, (list, tuple)) or len(claimed) < 2:
+            self._claim_cursor = "0-0"
+            return []
+        self._claim_cursor = str(claimed[0])
+        entries = claimed[1]
         return [
             (
                 str(stream_id),
