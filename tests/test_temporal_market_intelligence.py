@@ -97,16 +97,15 @@ def hypothesis(*, created_minute: int = 0, deadline_minute: int = 10) -> Hypothe
     )
 
 
-def test_quote_event_adapter_emits_only_available_typed_evidence() -> None:
-    received_at = BASE_TIME + timedelta(milliseconds=25)
-    event = QuoteEvent(
+def rich_quote_event() -> QuoteEvent:
+    return QuoteEvent(
         schema_version="1.1",
         symbol="btc-usd",
         price=Decimal("65000.5"),
         bid=Decimal("65000.0"),
         ask=Decimal("65001.0"),
         provider_timestamp=BASE_TIME,
-        received_at=received_at,
+        received_at=BASE_TIME + timedelta(milliseconds=25),
         sequence=7,
         provider="coinbase-research",
         capabilities=frozenset(
@@ -137,6 +136,9 @@ def test_quote_event_adapter_emits_only_available_typed_evidence() -> None:
         ),
     )
 
+
+def test_quote_event_adapter_emits_only_available_typed_evidence() -> None:
+    event = rich_quote_event()
     observations = quote_event_to_observations(
         event,
         record_hash=RECORD_HASH,
@@ -153,7 +155,7 @@ def test_quote_event_adapter_emits_only_available_typed_evidence() -> None:
     assert all(item.symbol == "BTC-USD" for item in observations)
     assert all(item.evidence[0].record_hash == RECORD_HASH for item in observations)
     assert all(item.evidence[0].ledger_index == 42 for item in observations)
-    assert all(item.evidence[0].received_at == received_at for item in observations)
+    assert all(item.evidence[0].received_at == event.received_at for item in observations)
     assert all(
         item.evidence[0].provenance_component == "websocket-jsonl-recorder"
         for item in observations
@@ -161,6 +163,36 @@ def test_quote_event_adapter_emits_only_available_typed_evidence() -> None:
     assert observations[0].metrics["provider"] == "coinbase-research"
     assert observations[2].metrics["net_aggressor_flow"] == Decimal("5")
     assert observations[3].metrics["depth_imbalance"] == Decimal("3")
+
+
+def test_quote_event_adapter_replay_is_deterministic_and_idempotent() -> None:
+    event = rich_quote_event()
+    first = quote_event_to_observations(
+        event,
+        record_hash=RECORD_HASH,
+        ledger_index=42,
+        generation=3,
+    )
+    replay = quote_event_to_observations(
+        event,
+        record_hash=RECORD_HASH,
+        ledger_index=42,
+        generation=3,
+    )
+
+    assert [item.observation_id for item in replay] == [
+        item.observation_id for item in first
+    ]
+    memory = TemporalMarketMemory()
+    assert memory.append_many(first) == 4
+    assert memory.append_many(replay) == 0
+
+
+def test_market_observation_metrics_are_deeply_immutable() -> None:
+    item = observation(minute_observed=0, minute_received=0)
+
+    with pytest.raises(TypeError):
+        item.metrics["score"] = Decimal("0.1")  # type: ignore[index]
 
 
 def test_temporal_memory_blocks_late_evidence_and_filters_expired_facts() -> None:
@@ -190,6 +222,17 @@ def test_temporal_memory_is_idempotent_but_rejects_id_reuse() -> None:
     assert memory.append(item) is False
     with pytest.raises(ValueError, match="different content"):
         memory.append(item.model_copy(update={"fact": "rewritten fact"}))
+
+
+def test_temporal_memory_revalidates_unsafe_model_copies() -> None:
+    memory = TemporalMarketMemory()
+    item = observation(minute_observed=0, minute_received=0)
+    unsafe = item.model_copy(
+        update={"evidence": (evidence(minute=0, received_minute=1),)}
+    )
+
+    with pytest.raises(ValidationError, match="learned after received_at"):
+        memory.append(unsafe)
 
 
 def test_observation_rejects_evidence_learned_after_observation_receipt() -> None:
@@ -239,6 +282,14 @@ def test_prediction_ledger_hash_links_the_full_hypothesis_and_confirmation() -> 
     assert ledger.snapshot(claim.hypothesis_id).state is HypothesisState.CONFIRMED
 
 
+def test_prediction_ledger_revalidates_unsafe_hypothesis_copies() -> None:
+    ledger = PredictionLedger()
+    claim = hypothesis().model_copy(update={"deadline": BASE_TIME})
+
+    with pytest.raises(ValidationError, match="deadline must be later"):
+        ledger.register(claim)
+
+
 def test_prediction_ledger_rejects_resolution_without_evidence() -> None:
     ledger = PredictionLedger()
     claim = hypothesis()
@@ -250,6 +301,21 @@ def test_prediction_ledger_rejects_resolution_without_evidence() -> None:
             to_state=HypothesisState.INVALIDATED,
             occurred_at=BASE_TIME + timedelta(minutes=2),
             reason="counterfactual observed",
+        )
+
+
+def test_prediction_ledger_rejects_only_pre_registration_evidence() -> None:
+    ledger = PredictionLedger()
+    claim = hypothesis()
+    ledger.register(claim)
+
+    with pytest.raises(ValueError, match="post-registration evidence"):
+        ledger.transition(
+            claim.hypothesis_id,
+            to_state=HypothesisState.CONFIRMED,
+            occurred_at=BASE_TIME + timedelta(minutes=2),
+            reason="reused the original supporting evidence",
+            evidence=claim.supporting_evidence,
         )
 
 
