@@ -3,7 +3,7 @@ from collections.abc import AsyncIterator, Collection
 from dataclasses import dataclass
 from enum import StrEnum
 
-from smart_market_data_gateway.domain import QuoteEvent
+from smart_market_data_gateway.domain import MarketEvidenceCapability, QuoteEvent
 
 
 class ProviderState(StrEnum):
@@ -26,6 +26,12 @@ class MarketDataProvider(ABC):
     @abstractmethod
     def name(self) -> str:
         """Stable provider identifier used in events and metrics."""
+
+    @property
+    def capabilities(self) -> frozenset[MarketEvidenceCapability]:
+        """Evidence classes this provider can emit for the current adapter mode."""
+
+        return frozenset({MarketEvidenceCapability.LEVEL1_QUOTE})
 
     @abstractmethod
     async def connect(self) -> None:
