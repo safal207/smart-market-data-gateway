@@ -57,3 +57,12 @@ def test_workspace_storage_has_an_exact_preference_allowlist() -> None:
     assert "theme: input.theme" in save_body
     assert "showVolume: input.showVolume" not in save_body
     assert "autoReconnect: input.autoReconnect" not in save_body
+
+
+def test_local_gateway_proxy_covers_history_and_live_stream() -> None:
+    vite_config = (CHART_ROOT / "vite.config.ts").read_text(encoding="utf-8")
+    assert '"/v1/candles"' in vite_config
+    assert 'target: "http://127.0.0.1:8000"' in vite_config
+    assert '"/v1/stream"' in vite_config
+    assert 'target: "ws://127.0.0.1:8000"' in vite_config
+    assert "proxy: gatewayProxy" in vite_config
