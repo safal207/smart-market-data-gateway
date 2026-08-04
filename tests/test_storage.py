@@ -67,7 +67,12 @@ async def test_stale_snapshot_and_many(redis_client, test_settings) -> None:
 
 async def test_server_side_candle_history(redis_client, test_settings) -> None:
     store = RedisStore(redis_client, test_settings)
-    start = datetime.now(UTC).replace(second=0, microsecond=0)
+    now = datetime.now(UTC)
+    current_five_minute = datetime.fromtimestamp(
+        int(now.timestamp()) - (int(now.timestamp()) % 300),
+        tz=UTC,
+    )
+    start = current_five_minute - timedelta(minutes=10)
     events = [
         quote(sequence=1, timestamp=start + timedelta(seconds=5), price="100"),
         quote(sequence=2, timestamp=start + timedelta(seconds=40), price="103"),
@@ -81,7 +86,7 @@ async def test_server_side_candle_history(redis_client, test_settings) -> None:
         "aapl",
         timeframe="5m",
         limit=2,
-        end=start + timedelta(minutes=5, seconds=1),
+        end=start + timedelta(minutes=5),
     )
 
     assert series.returned_count == 1
@@ -92,6 +97,52 @@ async def test_server_side_candle_history(redis_client, test_settings) -> None:
     assert candle.close == Decimal("98")
     assert candle.activity_count == 4
     assert candle.closed is True
+
+
+async def test_bucket_retention_uses_minute_deadline(
+    redis_client,
+    test_settings,
+    monkeypatch,
+) -> None:
+    retention_settings = test_settings.model_copy(
+        update={"candle_history_retention_seconds": 60}
+    )
+    store = RedisStore(redis_client, retention_settings)
+    first_now = datetime(2026, 8, 4, 12, 0, 30, tzinfo=UTC)
+    monkeypatch.setattr(
+        "smart_market_data_gateway.storage._utc_now",
+        lambda: first_now,
+    )
+    event = quote(
+        timestamp=datetime(2026, 8, 4, 11, 59, 45, tzinfo=UTC),
+        price="101",
+    )
+
+    await store.cache_quote(event)
+    readable = await store.get_candles(
+        "AAPL",
+        timeframe="1m",
+        limit=1,
+        end=datetime(2026, 8, 4, 12, 0, tzinfo=UTC),
+    )
+    assert readable.returned_count == 1
+
+    after_deadline = datetime(2026, 8, 4, 12, 1, 1, tzinfo=UTC)
+    monkeypatch.setattr(
+        "smart_market_data_gateway.storage._utc_now",
+        lambda: after_deadline,
+    )
+    expired = await store.get_candles(
+        "AAPL",
+        timeframe="1m",
+        limit=2,
+        end=datetime(2026, 8, 4, 12, 1, tzinfo=UTC),
+    )
+    bucket_epoch = str(int(datetime(2026, 8, 4, 11, 59, tzinfo=UTC).timestamp()))
+    index_key = "smdg:candles:index:v1:1m:AAPL"
+
+    assert expired.returned_count == 0
+    assert await redis_client.zscore(index_key, bucket_epoch) is None
 
 
 async def test_stream_retry_dlq_rate_limit_and_usage(redis_client, test_settings) -> None:
