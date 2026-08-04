@@ -6,7 +6,15 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import NAMESPACE_URL, uuid5
 
-from smart_market_data_gateway.domain import QuoteEvent
+from smart_market_data_gateway.domain import (
+    DepthSemantics,
+    EvidenceOrigin,
+    MarketEvidenceCapability,
+    QuantityUnit,
+    QuoteEvent,
+    VolumeKind,
+    VolumeSemantics,
+)
 from smart_market_data_gateway.providers.base import (
     MarketDataProvider,
     ProviderHealth,
@@ -52,6 +60,18 @@ class MockMarketDataProvider(MarketDataProvider):
     @property
     def name(self) -> str:
         return "mock-provider"
+
+    @property
+    def capabilities(self) -> frozenset[MarketEvidenceCapability]:
+        return frozenset(
+            {
+                MarketEvidenceCapability.LEVEL1_QUOTE,
+                MarketEvidenceCapability.VOLUME,
+                MarketEvidenceCapability.AGGRESSOR_FLOW,
+                MarketEvidenceCapability.TRADE_COUNT,
+                MarketEvidenceCapability.TOP_OF_BOOK_DEPTH,
+            }
+        )
 
     async def connect(self) -> None:
         async with self._lock:
@@ -142,7 +162,8 @@ class MockMarketDataProvider(MarketDataProvider):
         ):
             emitted_sequence = sequence - 1
 
-        base = Decimal(50 + sum(symbol.encode("utf-8")) % 200)
+        symbol_seed = sum(symbol.encode("utf-8"))
+        base = Decimal(50 + symbol_seed % 200)
         price = base + Decimal(sequence % 20) / Decimal("100")
         now = datetime.now(UTC)
         event_id = uuid5(
@@ -150,7 +171,16 @@ class MockMarketDataProvider(MarketDataProvider):
             f"{self.name}:{symbol}:{emitted_sequence}:{emission_number}",
         )
 
+        volume = Decimal(1_000 + symbol_seed % 250 + emission_number * 5)
+        buy_share = Decimal("0.45") + Decimal(sequence % 4) * Decimal("0.05")
+        buy_volume = (volume * buy_share).quantize(Decimal("0.01"))
+        sell_volume = volume - buy_volume
+        bid_depth = Decimal(500 + symbol_seed % 100 + sequence * 3)
+        ask_depth = Decimal(480 + symbol_seed % 90 + sequence * 2)
+        interval_ms = max(1, round(self._config.interval_seconds * 1_000))
+
         return QuoteEvent(
+            schema_version="1.1",
             event_id=event_id,
             symbol=symbol,
             price=price,
@@ -160,6 +190,24 @@ class MockMarketDataProvider(MarketDataProvider):
             received_at=now,
             sequence=emitted_sequence,
             provider=self.name,
+            capabilities=self.capabilities,
+            volume=volume,
+            buy_volume=buy_volume,
+            sell_volume=sell_volume,
+            trade_count=50 + emission_number % 25,
+            bid_depth=bid_depth,
+            ask_depth=ask_depth,
+            volume_semantics=VolumeSemantics(
+                kind=VolumeKind.INTERVAL,
+                unit=QuantityUnit.BASE_ASSET,
+                aggregation_window_ms=interval_ms,
+                origin=EvidenceOrigin.PROVIDER_AGGREGATED,
+            ),
+            depth_semantics=DepthSemantics(
+                unit=QuantityUnit.BASE_ASSET,
+                levels=1,
+                origin=EvidenceOrigin.NATIVE,
+            ),
         )
 
     @staticmethod
