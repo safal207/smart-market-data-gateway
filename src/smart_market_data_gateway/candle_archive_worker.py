@@ -3,17 +3,19 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from pydantic import ValidationError
 from redis.asyncio import Redis
 
 from smart_market_data_gateway.candle_archive import CandleArchiveSink
 from smart_market_data_gateway.config import settings
+from smart_market_data_gateway.domain import QuoteEvent
 from smart_market_data_gateway.logging import configure_logging
 
 logger = logging.getLogger(__name__)
 
 
 class RecoveringCandleArchiveSink(CandleArchiveSink):
-    """Archive worker that reclaims deliveries abandoned by crashed consumers."""
+    """Archive worker that reclaims abandoned deliveries without losing transient failures."""
 
     async def run(self) -> None:
         if not self.archive.available:
@@ -58,6 +60,45 @@ class RecoveringCandleArchiveSink(CandleArchiveSink):
             )
             for stream_id, fields in entries
         ]
+
+    async def _persist(self, stream_id: str, fields: dict[str, str]) -> None:
+        try:
+            event = QuoteEvent.model_validate_json(fields["payload"])
+        except (KeyError, ValidationError, ValueError) as exc:
+            await self._handle_invalid_message(stream_id, fields, exc)
+            return
+
+        # Database and network failures are transient. Leave the entry pending so
+        # XAUTOCLAIM can retry it after the dependency recovers.
+        await self.archive.persist_event(event)
+        await self.store.ack(
+            self.config.quote_stream,
+            self.config.candle_archive_group,
+            stream_id,
+        )
+
+    async def _handle_invalid_message(
+        self,
+        stream_id: str,
+        fields: dict[str, str],
+        exc: Exception,
+    ) -> None:
+        retry_key = f"archive:{self.config.quote_stream}:{stream_id}"
+        retry_count = await self.store.increment_retry(retry_key)
+        if retry_count < self.config.retry_limit:
+            raise exc
+        await self.store.move_to_dead_letter(
+            source_stream=self.config.quote_stream,
+            stream_id=stream_id,
+            payload=fields,
+            error=str(exc),
+            retry_count=retry_count,
+        )
+        await self.store.ack(
+            self.config.quote_stream,
+            self.config.candle_archive_group,
+            stream_id,
+        )
 
 
 async def _run() -> None:
