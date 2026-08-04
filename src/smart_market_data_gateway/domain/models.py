@@ -4,7 +4,16 @@ from enum import StrEnum
 from typing import Annotated, Any, Literal
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_serializer,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 Symbol = Annotated[str, Field(min_length=1, max_length=32, pattern=r"^[A-Z0-9._:-]+$")]
 PositiveDecimal = Annotated[Decimal, Field(gt=0)]
@@ -156,6 +165,21 @@ class QuoteEvent(BaseModel):
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("timestamps must include timezone information")
         return value
+
+    @field_serializer("capabilities")
+    def serialize_capabilities(
+        self,
+        capabilities: frozenset[MarketEvidenceCapability],
+    ) -> list[str]:
+        return sorted(capability.value for capability in capabilities)
+
+    @model_serializer(mode="wrap")
+    def serialize_available_evidence(
+        self,
+        handler: SerializerFunctionWrapHandler,
+    ) -> dict[str, Any]:
+        payload = handler(self)
+        return {key: value for key, value in payload.items() if value is not None}
 
     @model_validator(mode="after")
     def validate_market(self) -> "QuoteEvent":
