@@ -93,6 +93,11 @@ class CoinbaseMessageProjector:
         self._ticker_by_symbol: dict[str, _TickerState] = {}
         self._sequence_by_symbol: dict[str, int] = defaultdict(int)
 
+    def clear_connection_state(self) -> None:
+        """Drop connection-local book state while preserving local sequence continuity."""
+
+        self._ticker_by_symbol.clear()
+
     def apply(
         self,
         payload: Mapping[str, Any],
@@ -144,16 +149,15 @@ class CoinbaseMessageProjector:
 
         events: list[QuoteEvent] = []
         for symbol, trades in sorted(trades_by_symbol.items()):
-            if not trades:
-                continue
-            events.append(
-                self._build_quote_event(
-                    symbol,
-                    trades,
-                    message_timestamp=message_timestamp,
-                    received_at=received_at,
+            if trades:
+                events.append(
+                    self._build_quote_event(
+                        symbol,
+                        trades,
+                        message_timestamp=message_timestamp,
+                        received_at=received_at,
+                    )
                 )
-            )
         return tuple(events)
 
     def _build_quote_event(
@@ -182,9 +186,13 @@ class CoinbaseMessageProjector:
             else:
                 raise CoinbaseProtocolError("trade side must be BUY or SELL")
 
+            trade_id = str(trade.get("trade_id", "")).strip()
+            if not trade_id:
+                raise CoinbaseProtocolError("trade_id must not be empty")
+            trade_ids.append(trade_id)
             total_volume += size
             latest_price = price
-            trade_ids.append(str(trade.get("trade_id", "")))
+
             trade_time = trade.get("time")
             if trade_time is not None:
                 parsed_trade_time = _timestamp(trade_time, "trade.time")
@@ -221,7 +229,6 @@ class CoinbaseMessageProjector:
             (
                 COINBASE_PROVIDER_NAME,
                 symbol,
-                str(payload_sequence(trades)),
                 ",".join(trade_ids),
             )
         )
@@ -292,6 +299,7 @@ class CoinbaseResearchMarketDataProvider(MarketDataProvider):
                 return
             self._state = ProviderState.CONNECTING
             self._message = None
+            self._projector.clear_connection_state()
             try:
                 self._connection = await connect(
                     self._config.url,
@@ -316,6 +324,7 @@ class CoinbaseResearchMarketDataProvider(MarketDataProvider):
             connection = self._connection
             self._reader_task = None
             self._connection = None
+            self._symbols.clear()
             self._state = ProviderState.DISCONNECTED
             self._message = None
             self._heartbeats_subscribed = False
@@ -373,10 +382,9 @@ class CoinbaseResearchMarketDataProvider(MarketDataProvider):
                         raise CoinbaseProtocolError("WebSocket message must be a JSON object")
                     payload = cast(Mapping[str, Any], parsed)
                     for event in self._projector.apply(payload):
-                        if event.symbol not in self._symbols:
-                            continue
-                        await self._queue.put(event)
-                except (CoinbaseProtocolError, json.JSONDecodeError, TypeError, ValueError):
+                        if event.symbol in self._symbols:
+                            await self._queue.put(event)
+                except (TypeError, ValueError):
                     logger.warning(
                         "Coinbase market-data message rejected",
                         extra={"event": "coinbase_message_rejected"},
@@ -399,10 +407,6 @@ def _subscription_message(action: str, channel: str, symbols: Sequence[str]) -> 
     if symbols:
         payload["product_ids"] = list(symbols)
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
-
-
-def payload_sequence(trades: Sequence[Mapping[str, Any]]) -> str:
-    return str(trades[-1].get("trade_id", "unknown")) if trades else "empty"
 
 
 def _mapping_sequence(value: object, field: str) -> tuple[Mapping[str, Any], ...]:
@@ -452,13 +456,13 @@ def _non_negative_decimal(value: object, field: str) -> Decimal:
 
 
 def _optional_positive_decimal(value: object, field: str) -> Decimal | None:
-    if value in {None, ""}:
+    if value is None or value == "":
         return None
     return _positive_decimal(value, field)
 
 
 def _optional_non_negative_decimal(value: object, field: str) -> Decimal | None:
-    if value in {None, ""}:
+    if value is None or value == "":
         return None
     return _non_negative_decimal(value, field)
 
