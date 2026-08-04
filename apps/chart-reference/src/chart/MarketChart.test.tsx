@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { MarketChart } from "./MarketChart";
@@ -124,9 +124,52 @@ describe("MarketChart", () => {
       />,
     );
     const options = mount.mock.calls[0]?.[1];
-    options?.onCrosshairMove?.({ ...candle, activitySource: "updates" });
+    act(() => options?.onCrosshairMove?.({ ...candle, activitySource: "updates" }));
     expect(screen.getByText("Activity")).toBeVisible();
     expect(screen.getByText(/mixed reported volume/i)).toBeVisible();
+  });
+
+  it("clears a previous-series crosshair when the instrument identity changes", async () => {
+    const { renderer, mount } = rendererDouble();
+    const rendererFactory = () => renderer;
+    const next: ChartCandle = {
+      ...candle,
+      timeMs: candle.timeMs + 300_000,
+      open: 200,
+      high: 202,
+      low: 199,
+      close: 201.5,
+    };
+    const view = render(
+      <MarketChart
+        candles={[candle]}
+        symbol="AAPL.US"
+        timeframeLabel="1 minute"
+        precision={2}
+        theme="dark"
+        paused={false}
+        rendererFactory={rendererFactory}
+      />,
+    );
+    const options = mount.mock.calls[0]?.[1];
+    act(() => options?.onCrosshairMove?.({ ...candle, close: 777 }));
+    expect(screen.getByLabelText("Crosshair bar")).toHaveTextContent(/777/);
+
+    view.rerender(
+      <MarketChart
+        candles={[next]}
+        symbol="MSFT.US"
+        timeframeLabel="5 minutes"
+        precision={2}
+        theme="dark"
+        paused={false}
+        rendererFactory={rendererFactory}
+      />,
+    );
+
+    await waitFor(() => expect(screen.getByLabelText("Latest bar")).toBeVisible());
+    expect(screen.getByLabelText("Latest bar")).not.toHaveTextContent(/777/);
+    expect(screen.getByLabelText("Latest bar")).toHaveTextContent(/201[.,]50/);
   });
 
   it("renders the supplied empty state", () => {
