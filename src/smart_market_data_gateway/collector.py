@@ -193,15 +193,15 @@ def build_provider(config: Settings) -> MarketDataProvider:
             )
         )
     if provider_name == "coinbase":
-        return CoinbaseResearchMarketDataProvider(
-            CoinbaseResearchConfig(
-                url=config.coinbase_ws_url,
-                use_mode=config.coinbase_use_mode,
-                market_data_terms_accepted=config.coinbase_market_data_terms_accepted,
-                environment=config.environment,
-                queue_size=config.coinbase_queue_size,
-            )
+        provider_config = CoinbaseResearchConfig(
+            url=config.coinbase_ws_url,
+            use_mode=config.coinbase_use_mode,
+            market_data_terms_accepted=config.coinbase_market_data_terms_accepted,
+            environment=config.environment,
+            queue_size=config.coinbase_queue_size,
         )
+        provider_config.validate_usage()
+        return CoinbaseResearchMarketDataProvider(provider_config)
     raise ValueError(f"unsupported market_data_provider: {config.market_data_provider}")
 
 
