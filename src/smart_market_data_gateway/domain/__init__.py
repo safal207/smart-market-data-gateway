@@ -1,19 +1,31 @@
 from smart_market_data_gateway.domain.models import (
     ClientIdentity,
+    DepthSemantics,
+    EvidenceOrigin,
     GapObservation,
+    MarketEvidenceCapability,
+    QuantityUnit,
     QuoteEvent,
     QuoteSnapshot,
     ServiceTier,
     StreamMessage,
     SubscriptionCommand,
+    VolumeKind,
+    VolumeSemantics,
 )
 
 __all__ = [
     "ClientIdentity",
+    "DepthSemantics",
+    "EvidenceOrigin",
     "GapObservation",
+    "MarketEvidenceCapability",
+    "QuantityUnit",
     "QuoteEvent",
     "QuoteSnapshot",
     "ServiceTier",
     "StreamMessage",
     "SubscriptionCommand",
+    "VolumeKind",
+    "VolumeSemantics",
 ]
