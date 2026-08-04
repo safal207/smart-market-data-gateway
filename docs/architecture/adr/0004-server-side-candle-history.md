@@ -17,26 +17,28 @@ The quote processor maintains canonical one-minute candles in Redis after an eve
 - Open and close are selected by provider event time, with event ID as a deterministic tie-breaker.
 - High and low retain decimal values without converting prices through binary floating-point arithmetic.
 - Higher timeframes (`5m`, `15m`, `1h`, `4h`, `1d`) are aggregated from the canonical `1m` series at read time.
+- Historical responses contain only fully closed intervals whose interval end is at or before the requested `end`.
+- Retention preserves a whole UTC minute until `bucket_end + retention`; value TTL, index pruning, index expiry, and read filtering use that same deadline.
 - Retention defaults to 30 days and is configurable with `SMDG_CANDLE_HISTORY_RETENTION_SECONDS`.
 - The REST endpoint is available only when the caller's tier policy has `historical_data=true`.
 
-The public source label is `observed_quote_aggregation`. Responses explicitly state that trade volume is unavailable and that intervals without accepted observations are omitted. `activity_count` means accepted quote observations, not executed trades.
+The public source label is `observed_quote_aggregation`. Responses explicitly state that trade volume is unavailable, partial intervals are omitted, and intervals without accepted observations are omitted. `activity_count` means accepted quote observations, not executed trades.
 
 ## API
 
 `GET /v1/candles/{symbol}` accepts:
 
 - `timeframe`: `1m`, `5m`, `15m`, `1h`, `4h`, or `1d`;
-- `limit`: 1–1000 candles;
-- `end`: optional timezone-aware timestamp.
+- `limit`: 1–1000 closed candle slots in the requested lookback window;
+- `end`: optional timezone-aware timestamp that must not be in the future.
 
-The endpoint returns an empty `data` list rather than a fabricated flat candle when no observations exist.
+The endpoint returns an empty `data` list rather than a fabricated flat or partial candle when no fully closed observations exist. Because only minute OHLC state is retained, the service cannot reconstruct an as-of partial minute; it omits that interval instead.
 
 ## Failure and recovery
 
-A candle update is committed in the same optimistic Redis transaction as the latest-quote cache update. Transaction conflicts retry up to `SMDG_CANDLE_UPDATE_RETRY_LIMIT`; exhausting retries fails quote processing so the existing stream retry and dead-letter behavior remains visible.
+A candle update is committed in the same optimistic Redis transaction as the latest-quote cache update. Transaction conflicts retry up to `SMDG_CANDLE_UPDATE_RETRY_LIMIT`; exhausting retries fails quote processing so the existing stream retry and dead-letter behavior remains visible. Non-positive retention or retry settings fail application configuration validation before startup.
 
-Expired candle values use Redis TTL. The sorted-set index is pruned by observation time and self-heals missing members during reads.
+Each candle value expires at its bucket-aligned retention deadline. Writes prune expired sorted-set members and refresh an index TTL; reads also prune expired or missing members, so inactive indexes disappear and stale members cannot make expired candles readable.
 
 ## Consequences
 
@@ -44,6 +46,7 @@ Expired candle values use Redis TTL. The sorted-set index is pruned by observati
 
 - all clients receive the same server-derived history;
 - out-of-order quotes produce deterministic OHLC values;
+- historical boundaries never expose observations later than `period_end`;
 - storage grows by minutes rather than raw quote frequency;
 - tier entitlements can monetize historical access;
 - the response does not overclaim trade volume or provider-native exchange history.
@@ -51,6 +54,7 @@ Expired candle values use Redis TTL. The sorted-set index is pruned by observati
 ### Limitations
 
 - history starts warming only after this feature is deployed;
+- in-progress and partial historical buckets are omitted and must be completed from the live stream by clients;
 - gaps remain gaps and are not forward-filled;
 - quote-derived OHLC can differ from trade-derived or exchange-official candles;
 - retention is Redis-backed and is not yet a long-term archival store;
