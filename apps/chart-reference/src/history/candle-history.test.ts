@@ -39,12 +39,12 @@ const VALID_PAYLOAD = {
 } as const;
 
 describe("CandleHistoryClient", () => {
-  it("loads and validates canonical history without persisting the bearer token", async () => {
+  it("loads through a configured base path without persisting the bearer token", async () => {
     const fetcher = vi.fn((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const url = input instanceof URL
         ? input
         : new URL(typeof input === "string" ? input : input.url);
-      expect(url.pathname).toBe("/v1/candles/AAPL.US");
+      expect(url.pathname).toBe("/gateway/v1/candles/AAPL.US");
       expect(url.searchParams.get("timeframe")).toBe("5m");
       expect(url.searchParams.get("limit")).toBe("500");
       expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer dev-pro:test-client");
@@ -55,7 +55,7 @@ describe("CandleHistoryClient", () => {
       }));
     });
     const client = new CandleHistoryClient({
-      baseUrl: "http://gateway.test:8000",
+      baseUrl: "http://gateway.test:8000/gateway",
       fetch: fetcher,
     });
 
