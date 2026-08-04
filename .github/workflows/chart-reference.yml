@@ -1,0 +1,76 @@
+name: Chart Reference
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "apps/chart-reference/**"
+      - ".github/workflows/chart-reference.yml"
+      - "tests/test_chart_reference_workflow.py"
+  pull_request:
+    paths:
+      - "apps/chart-reference/**"
+      - ".github/workflows/chart-reference.yml"
+      - "tests/test_chart_reference_workflow.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  chart-reference:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: apps/chart-reference
+
+    steps:
+      - name: Checkout exact revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: 11.9.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: apps/chart-reference/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Audit dependencies
+        run: pnpm audit --audit-level high
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Type-check
+        run: pnpm typecheck
+
+      - name: Unit and component tests
+        run: pnpm test:coverage
+
+      - name: Production build
+        run: pnpm build
+
+      - name: Install Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Responsive and accessibility tests
+        run: pnpm test:e2e
