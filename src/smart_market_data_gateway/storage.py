@@ -2,6 +2,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 import json
 import logging
+from math import ceil
 from typing import Any
 
 from redis.asyncio import Redis
@@ -20,6 +21,10 @@ from smart_market_data_gateway.config import Settings
 from smart_market_data_gateway.domain import GapObservation, QuoteEvent, QuoteSnapshot
 
 logger = logging.getLogger(__name__)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
 
 
 class RedisStore:
@@ -53,7 +58,7 @@ class RedisStore:
             {
                 "action": action,
                 "symbol": symbol,
-                "created_at": datetime.now(UTC).isoformat(),
+                "created_at": _utc_now().isoformat(),
             },
             maxlen=10_000,
             approximate=True,
@@ -94,21 +99,32 @@ class RedisStore:
     def _candle_key(symbol: str, bucket_epoch: str) -> str:
         return f"smdg:candles:data:v1:1m:{symbol}:{bucket_epoch}"
 
+    def _expired_bucket_score(self, now: datetime) -> float:
+        return (
+            now
+            - timedelta(
+                seconds=self.settings.candle_history_retention_seconds + 60,
+            )
+        ).timestamp()
+
     async def cache_quote(self, event: QuoteEvent) -> None:
         latest_key = f"smdg:latest:{event.symbol}"
         retention_seconds = self.settings.candle_history_retention_seconds
-        now = datetime.now(UTC)
-        cutoff = now - timedelta(seconds=retention_seconds)
+        now = _utc_now()
+        bucket = floor_time(event.provider_timestamp, 60)
+        bucket_end = bucket + timedelta(minutes=1)
+        retention_deadline = bucket_end + timedelta(seconds=retention_seconds)
 
-        if event.provider_timestamp.astimezone(UTC) < cutoff:
+        if retention_deadline <= now:
             await self.redis.set(latest_key, event.model_dump_json())
             return
 
-        bucket = floor_time(event.provider_timestamp, 60)
         bucket_epoch = str(int(bucket.timestamp()))
         candle_key = self._candle_key(event.symbol, bucket_epoch)
         index_key = self._candle_index_key(event.symbol)
-        ttl_seconds = retention_seconds + 120
+        ttl_seconds = max(1, ceil((retention_deadline - now).total_seconds()))
+        index_ttl_seconds = retention_seconds + 60
+        expired_bucket_score = self._expired_bucket_score(now)
 
         for _attempt in range(self.settings.candle_update_retry_limit):
             async with self.redis.pipeline(transaction=True) as pipe:
@@ -124,7 +140,8 @@ class RedisStore:
                     pipe.set(latest_key, event.model_dump_json())
                     pipe.set(candle_key, candle.model_dump_json(), ex=ttl_seconds)
                     pipe.zadd(index_key, {bucket_epoch: bucket.timestamp()})
-                    pipe.zremrangebyscore(index_key, "-inf", cutoff.timestamp())
+                    pipe.zremrangebyscore(index_key, "-inf", expired_bucket_score)
+                    pipe.expire(index_key, index_ttl_seconds)
                     await pipe.execute()
                     return
                 except WatchError:
@@ -140,7 +157,7 @@ class RedisStore:
         if payload is None:
             return None
         quote = QuoteEvent.model_validate_json(payload)
-        age_seconds = max(0.0, (datetime.now(UTC) - quote.received_at).total_seconds())
+        age_seconds = max(0.0, (_utc_now() - quote.received_at).total_seconds())
         return QuoteSnapshot(
             quote=quote,
             stale=age_seconds > self.settings.quote_freshness_seconds,
@@ -151,7 +168,7 @@ class RedisStore:
         normalized = [symbol.upper() for symbol in symbols]
         payloads = await self.redis.mget([f"smdg:latest:{symbol}" for symbol in normalized])
         result: dict[str, QuoteSnapshot | None] = {}
-        now = datetime.now(UTC)
+        now = _utc_now()
         for symbol, payload in zip(normalized, payloads, strict=True):
             if payload is None:
                 result[symbol] = None
@@ -176,6 +193,11 @@ class RedisStore:
         normalized = symbol.upper()
         start, effective_end = history_window(timeframe=timeframe, limit=limit, end=end)
         index_key = self._candle_index_key(normalized)
+        await self.redis.zremrangebyscore(
+            index_key,
+            "-inf",
+            self._expired_bucket_score(_utc_now()),
+        )
         bucket_epochs = await self.redis.zrangebyscore(
             index_key,
             start.timestamp(),
@@ -268,7 +290,7 @@ class RedisStore:
                 "payload": json.dumps(payload, default=str),
                 "error": error,
                 "retry_count": retry_count,
-                "failed_at": datetime.now(UTC).isoformat(),
+                "failed_at": _utc_now().isoformat(),
             },
             maxlen=10_000,
             approximate=True,
@@ -315,7 +337,7 @@ class RedisStore:
                 "event_type": event_type,
                 "quantity": quantity,
                 "metadata": json.dumps(metadata or {}, default=str),
-                "created_at": datetime.now(UTC).isoformat(),
+                "created_at": _utc_now().isoformat(),
             },
             maxlen=100_000,
             approximate=True,
