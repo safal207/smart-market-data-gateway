@@ -89,6 +89,26 @@ describe("versioned workspace persistence", () => {
     expect(storage.getItem(WORKSPACE_STORAGE_KEY)).not.toContain("autoReconnect");
   });
 
+  it.each(["   ", "bad symbol!"])(
+    "falls back safely for invalid expanded-v1 symbol %j",
+    (selectedSymbol) => {
+      const storage = new MemoryStorage();
+      storage.setItem(
+        WORKSPACE_STORAGE_KEY,
+        JSON.stringify({
+          version: 1,
+          selectedSymbol,
+          timeframe: "5m",
+          theme: "light",
+          showVolume: false,
+          autoReconnect: false,
+        }),
+      );
+
+      expect(loadWorkspace(storage)).toEqual(DEFAULT_WORKSPACE);
+    },
+  );
+
   it("migrates a legacy resolution and falls back safely on corrupt data", () => {
     const storage = new MemoryStorage();
     storage.setItem(

@@ -38,6 +38,21 @@ const legacyWorkspaceSchema = z
   })
   .passthrough();
 
+const LEGACY_TIMEFRAME_ALIASES = new Map<string, Timeframe>([
+  ["5", "5s"],
+  ["5s", "5s"],
+  ["60", "1m"],
+  ["1m", "1m"],
+  ["300", "5m"],
+  ["5m", "5m"],
+  ["900", "15m"],
+  ["15m", "15m"],
+  ["3600", "1h"],
+  ["1h", "1h"],
+  ["d", "1d"],
+  ["1d", "1d"],
+]);
+
 export type WorkspaceTheme = "dark" | "light" | "system";
 
 export interface WorkspaceState {
@@ -76,17 +91,23 @@ export function loadWorkspace(
     const raw: unknown = JSON.parse(serialized);
     const current = persistedWorkspaceSchema.safeParse(raw);
     if (current.success) return hydrateWorkspace(current.data, fallback);
+
     const expandedV1 = expandedV1WorkspaceSchema.safeParse(raw);
     if (expandedV1.success) {
-      return Object.freeze({
+      const normalized = persistedWorkspaceSchema.safeParse({
         version: WORKSPACE_VERSION,
-        selectedSymbol: expandedV1.data.selectedSymbol.trim().toUpperCase(),
+        selectedSymbol: expandedV1.data.selectedSymbol,
         timeframe: expandedV1.data.timeframe,
         theme: expandedV1.data.theme,
+      });
+      if (!normalized.success) return Object.freeze({ ...fallback });
+      return Object.freeze({
+        ...hydrateWorkspace(normalized.data, fallback),
         showVolume: expandedV1.data.showVolume,
         autoReconnect: expandedV1.data.autoReconnect,
       });
     }
+
     const migrated = migrateLegacyWorkspace(raw, fallback);
     return migrated ?? Object.freeze({ ...fallback });
   } catch {
@@ -164,22 +185,7 @@ function migrateLegacyWorkspace(
 }
 
 function normalizeLegacyTimeframe(value: string): Timeframe | undefined {
-  const normalized = value.trim().toLowerCase();
-  const aliases: Readonly<Record<string, Timeframe>> = {
-    "5": "5s",
-    "5s": "5s",
-    "60": "1m",
-    "1m": "1m",
-    "300": "5m",
-    "5m": "5m",
-    "900": "15m",
-    "15m": "15m",
-    "3600": "1h",
-    "1h": "1h",
-    d: "1d",
-    "1d": "1d",
-  };
-  return aliases[normalized];
+  return LEGACY_TIMEFRAME_ALIASES.get(value.trim().toLowerCase());
 }
 
 function browserStorage(): WorkspaceStorage | undefined {
