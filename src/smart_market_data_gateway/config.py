@@ -107,10 +107,17 @@ class Settings(BaseSettings):
     entitlement_cache_ttl_seconds: int = 30
     shutdown_timeout_seconds: float = 10.0
 
+    market_data_provider: str = "mock"
+
     mock_symbols: str = "AAPL,TSLA,NVDA,MSFT,GOOG"
     mock_interval_seconds: float = 0.1
     mock_duplicate_every: int | None = None
     mock_fail_after_events: int | None = None
+
+    coinbase_ws_url: str = "wss://advanced-trade-ws.coinbase.com"
+    coinbase_use_mode: str = "disabled"
+    coinbase_market_data_terms_accepted: bool = False
+    coinbase_queue_size: int = Field(default=10_000, gt=0)
 
     tier_policies_json: str = json.dumps(DEFAULT_TIER_POLICIES)
 
