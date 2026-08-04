@@ -40,16 +40,6 @@ def quote_event_to_observations(
         record_hash=record_hash,
         ledger_index=ledger_index,
     )
-    common = {
-        "symbol": event.symbol,
-        "observed_at": event.provider_timestamp,
-        "received_at": event.received_at,
-        "source": event.provider,
-        "confidence": Decimal("1"),
-        "evidence": (evidence_ref,),
-        "expires_at": expires_at,
-        "generation": generation,
-    }
 
     quote_metrics: dict[str, MetricValue] = {
         "schema_version": event.schema_version,
@@ -61,11 +51,14 @@ def quote_event_to_observations(
     _put_if_present(quote_metrics, "ask", event.ask)
     _put_if_present(quote_metrics, "sequence", event.sequence)
     observations: list[MarketObservation] = [
-        MarketObservation(
-            **common,
+        _observation(
+            event=event,
+            evidence_ref=evidence_ref,
             kind=ObservationKind.QUOTE,
             fact=f"{event.symbol} quote observed at {event.price}",
             metrics=quote_metrics,
+            expires_at=expires_at,
+            generation=generation,
         )
     ]
 
@@ -75,11 +68,14 @@ def quote_event_to_observations(
         _put_if_present(volume_metrics, "trade_count", event.trade_count)
         _add_volume_semantics(volume_metrics, event)
         observations.append(
-            MarketObservation(
-                **common,
+            _observation(
+                event=event,
+                evidence_ref=evidence_ref,
                 kind=ObservationKind.VOLUME,
                 fact=f"{event.symbol} volume evidence observed",
                 metrics=volume_metrics,
+                expires_at=expires_at,
+                generation=generation,
             )
         )
 
@@ -91,11 +87,14 @@ def quote_event_to_observations(
         }
         _add_volume_semantics(flow_metrics, event)
         observations.append(
-            MarketObservation(
-                **common,
+            _observation(
+                event=event,
+                evidence_ref=evidence_ref,
                 kind=ObservationKind.AGGRESSOR_FLOW,
                 fact=f"{event.symbol} aggressor-flow evidence observed",
                 metrics=flow_metrics,
+                expires_at=expires_at,
+                generation=generation,
             )
         )
 
@@ -115,15 +114,43 @@ def quote_event_to_observations(
             )
             _put_if_present(depth_metrics, "depth_currency", event.depth_semantics.currency)
         observations.append(
-            MarketObservation(
-                **common,
+            _observation(
+                event=event,
+                evidence_ref=evidence_ref,
                 kind=ObservationKind.TOP_OF_BOOK_DEPTH,
                 fact=f"{event.symbol} top-of-book depth observed",
                 metrics=depth_metrics,
+                expires_at=expires_at,
+                generation=generation,
             )
         )
 
     return tuple(observations)
+
+
+def _observation(
+    *,
+    event: QuoteEvent,
+    evidence_ref: EvidenceRef,
+    kind: ObservationKind,
+    fact: str,
+    metrics: dict[str, MetricValue],
+    expires_at: datetime | None,
+    generation: int | None,
+) -> MarketObservation:
+    return MarketObservation(
+        symbol=event.symbol,
+        kind=kind,
+        observed_at=event.provider_timestamp,
+        received_at=event.received_at,
+        source=event.provider,
+        fact=fact,
+        metrics=metrics,
+        confidence=Decimal("1"),
+        evidence=(evidence_ref,),
+        expires_at=expires_at,
+        generation=generation,
+    )
 
 
 def _add_volume_semantics(metrics: dict[str, MetricValue], event: QuoteEvent) -> None:
