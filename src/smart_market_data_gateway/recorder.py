@@ -4,16 +4,60 @@ import argparse
 import asyncio
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import asdict, dataclass
+import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
 import sys
 from typing import Any, cast
+from uuid import uuid4
 
 from pydantic import ValidationError
 from websockets.asyncio.client import connect
 
 from smart_market_data_gateway.domain import QuoteEvent, StreamMessage
+
+LEDGER_VERSION = "1.0"
+LEDGER_ALGORITHM = "sha256"
+GENESIS_HASH = "0" * 64
+PROVENANCE_SYSTEM = "smart-market-data-gateway"
+PROVENANCE_COMPONENT = "websocket-jsonl-recorder"
+PROVENANCE_TRANSPORT = "websocket"
+RESERVED_LEDGER_FIELDS = frozenset(
+    {
+        "ledger_version",
+        "ledger_algorithm",
+        "ledger_index",
+        "previous_record_hash",
+        "record_hash",
+        "recorder_session_id",
+        "provenance_system",
+        "provenance_component",
+        "provenance_transport",
+    }
+)
+
+
+class LedgerIntegrityError(ValueError):
+    """Raised when an existing recording cannot be trusted as a ledger."""
+
+
+@dataclass(frozen=True, slots=True)
+class LedgerVerification:
+    """Deterministic verification result for one complete JSONL ledger."""
+
+    records: int
+    head_hash: str
+    session_ids: tuple[str, ...]
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "records": self.records,
+            "head_hash": self.head_hash,
+            "session_ids": list(self.session_ids),
+            "verified": True,
+        }
 
 
 @dataclass(slots=True)
@@ -32,13 +76,140 @@ class RecorderCounters:
         return asdict(self)
 
 
-class AtomicJsonlWriter:
-    """Append complete JSONL records and roll back a failed partial append."""
+def canonical_record_bytes(record: Mapping[str, Any]) -> bytes:
+    """Encode one ledger record in the canonical form used by the hash chain."""
 
-    def __init__(self, path: Path, *, fsync: bool = True) -> None:
+    payload = dict(record)
+    payload.pop("record_hash", None)
+    return json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+
+def compute_record_hash(record: Mapping[str, Any]) -> str:
+    """Return the lowercase SHA-256 digest for a canonical ledger record."""
+
+    return hashlib.sha256(canonical_record_bytes(record)).hexdigest()
+
+
+def _require_hash(value: object, *, field: str, line_number: int) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise LedgerIntegrityError(
+            f"line {line_number}: {field} must be a lowercase 64-character SHA-256 digest"
+        )
+    return value
+
+
+def verify_jsonl_ledger(path: Path, *, allow_missing: bool = False) -> LedgerVerification:
+    """Verify framing, canonical hashes, indexes, provenance, and every chain link."""
+
+    if not path.exists():
+        if allow_missing:
+            return LedgerVerification(records=0, head_hash=GENESIS_HASH, session_ids=())
+        raise LedgerIntegrityError(f"ledger does not exist: {path}")
+
+    size = path.stat().st_size
+    if size == 0:
+        return LedgerVerification(records=0, head_hash=GENESIS_HASH, session_ids=())
+
+    with path.open("rb") as handle:
+        handle.seek(-1, os.SEEK_END)
+        if handle.read(1) != b"\n":
+            raise LedgerIntegrityError("ledger must end with a complete newline-terminated record")
+        handle.seek(0)
+
+        expected_previous_hash = GENESIS_HASH
+        expected_index = 0
+        session_ids: set[str] = set()
+
+        for line_number, raw_line in enumerate(handle, start=1):
+            try:
+                payload = json.loads(raw_line)
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise LedgerIntegrityError(
+                    f"line {line_number}: invalid UTF-8 JSON record"
+                ) from exc
+            if not isinstance(payload, dict):
+                raise LedgerIntegrityError(f"line {line_number}: ledger record must be an object")
+
+            if payload.get("ledger_version") != LEDGER_VERSION:
+                raise LedgerIntegrityError(
+                    f"line {line_number}: unsupported or missing ledger_version"
+                )
+            if payload.get("ledger_algorithm") != LEDGER_ALGORITHM:
+                raise LedgerIntegrityError(
+                    f"line {line_number}: unsupported or missing ledger_algorithm"
+                )
+            if payload.get("ledger_index") != expected_index:
+                raise LedgerIntegrityError(
+                    f"line {line_number}: ledger_index must equal {expected_index}"
+                )
+            if payload.get("provenance_system") != PROVENANCE_SYSTEM:
+                raise LedgerIntegrityError(f"line {line_number}: invalid provenance_system")
+            if payload.get("provenance_component") != PROVENANCE_COMPONENT:
+                raise LedgerIntegrityError(f"line {line_number}: invalid provenance_component")
+            if payload.get("provenance_transport") != PROVENANCE_TRANSPORT:
+                raise LedgerIntegrityError(f"line {line_number}: invalid provenance_transport")
+
+            session_id = payload.get("recorder_session_id")
+            if not isinstance(session_id, str) or not session_id.strip():
+                raise LedgerIntegrityError(f"line {line_number}: recorder_session_id is required")
+            session_ids.add(session_id)
+
+            previous_hash = _require_hash(
+                payload.get("previous_record_hash"),
+                field="previous_record_hash",
+                line_number=line_number,
+            )
+            if not hmac.compare_digest(previous_hash, expected_previous_hash):
+                raise LedgerIntegrityError(
+                    f"line {line_number}: previous_record_hash does not match the prior record"
+                )
+
+            stored_hash = _require_hash(
+                payload.get("record_hash"),
+                field="record_hash",
+                line_number=line_number,
+            )
+            computed_hash = compute_record_hash(payload)
+            if not hmac.compare_digest(stored_hash, computed_hash):
+                raise LedgerIntegrityError(f"line {line_number}: record_hash mismatch")
+
+            expected_previous_hash = stored_hash
+            expected_index += 1
+
+    return LedgerVerification(
+        records=expected_index,
+        head_hash=expected_previous_hash,
+        session_ids=tuple(sorted(session_ids)),
+    )
+
+
+class AtomicJsonlWriter:
+    """Append complete hash-chained JSONL records and roll back partial writes."""
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        fsync: bool = True,
+        session_id: str | None = None,
+    ) -> None:
         self.path = path
         self.fsync = fsync
+        self.session_id = session_id or str(uuid4())
+        if not self.session_id.strip():
+            raise ValueError("session_id must not be empty")
         self._fd: int | None = None
+        self._next_ledger_index = 0
+        self._previous_record_hash = GENESIS_HASH
 
     def __enter__(self) -> AtomicJsonlWriter:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -46,19 +217,54 @@ class AtomicJsonlWriter:
         if hasattr(os, "O_CLOEXEC"):
             flags |= os.O_CLOEXEC
         self._fd = os.open(self.path, flags, 0o600)
+        try:
+            verification = verify_jsonl_ledger(self.path)
+        except BaseException:
+            os.close(self._fd)
+            self._fd = None
+            raise
+        self._next_ledger_index = verification.records
+        self._previous_record_hash = verification.head_hash
         return self
 
     def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
         self.close()
 
-    def write(self, record: Mapping[str, Any]) -> None:
+    def write(self, record: Mapping[str, Any]) -> dict[str, Any]:
         if self._fd is None:
             raise RuntimeError("JSONL writer is not open")
 
+        conflicting_fields = RESERVED_LEDGER_FIELDS.intersection(record)
+        if conflicting_fields:
+            names = ", ".join(sorted(conflicting_fields))
+            raise ValueError(f"record contains reserved evidence-ledger fields: {names}")
+
+        ledger_record = dict(record)
+        ledger_record.update(
+            {
+                "ledger_version": LEDGER_VERSION,
+                "ledger_algorithm": LEDGER_ALGORITHM,
+                "ledger_index": self._next_ledger_index,
+                "previous_record_hash": self._previous_record_hash,
+                "recorder_session_id": self.session_id,
+                "provenance_system": PROVENANCE_SYSTEM,
+                "provenance_component": PROVENANCE_COMPONENT,
+                "provenance_transport": PROVENANCE_TRANSPORT,
+            }
+        )
+        ledger_record["record_hash"] = compute_record_hash(ledger_record)
+        payload = canonical_record_bytes(ledger_record)
+        payload = payload[:-1] if payload.endswith(b"\n") else payload
         payload = (
-            json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            json.dumps(
+                ledger_record,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
             + "\n"
         ).encode("utf-8")
+
         original_size = os.fstat(self._fd).st_size
         remaining = memoryview(payload)
         try:
@@ -74,6 +280,10 @@ class AtomicJsonlWriter:
             if self.fsync:
                 os.fsync(self._fd)
             raise
+
+        self._previous_record_hash = ledger_record["record_hash"]
+        self._next_ledger_index += 1
+        return ledger_record
 
     def close(self) -> None:
         if self._fd is None:
@@ -243,15 +453,16 @@ async def record_websocket(
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="smdg-recorder",
-        description="Record authenticated quote messages as append-only TMI-compatible JSONL.",
+        description="Record or verify tamper-evident TMI-compatible market-data JSONL.",
     )
     parser.add_argument(
         "--url",
         default=os.getenv("SMDG_RECORDER_URL", "ws://localhost:8000/v1/stream"),
     )
     parser.add_argument("--token", default=os.getenv("SMDG_RECORDER_TOKEN"))
-    parser.add_argument("--symbol", action="append", dest="symbols", required=True)
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--symbol", action="append", dest="symbols")
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--verify-ledger", type=Path)
     parser.add_argument("--max-records", type=int, default=0)
     parser.add_argument("--max-reconnects", type=int, default=10)
     parser.add_argument("--no-fsync", action="store_true")
@@ -260,8 +471,22 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.verify_ledger is not None:
+        try:
+            verification = verify_jsonl_ledger(args.verify_ledger)
+        except (OSError, LedgerIntegrityError) as exc:
+            raise SystemExit(f"smdg-recorder: {exc}") from exc
+        json.dump(verification.as_dict(), sys.stdout, sort_keys=True)
+        sys.stdout.write("\n")
+        return 0
+
     if not args.token:
         raise SystemExit("smdg-recorder: set --token or SMDG_RECORDER_TOKEN")
+    if not args.symbols:
+        raise SystemExit("smdg-recorder: provide at least one --symbol")
+    if args.output is None:
+        raise SystemExit("smdg-recorder: --output is required when recording")
+
     try:
         counters = asyncio.run(
             record_websocket(
