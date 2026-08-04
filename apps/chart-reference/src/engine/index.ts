@@ -45,6 +45,7 @@ export {
   DEFAULT_STALE_AFTER_MS,
   isMarketDataPointStale,
   marketDataAgeMs,
+  recordMarketDataObservation,
 } from "./freshness";
 
 export {
