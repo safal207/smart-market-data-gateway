@@ -97,6 +97,11 @@ class Settings(BaseSettings):
     )
     candle_archive_pool_max_size: int = Field(default=4, ge=1, le=32)
     candle_archive_claim_idle_ms: int = Field(default=30_000, ge=1)
+    candle_archive_metrics_interval_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        le=300,
+    )
     subscription_grace_seconds: float = 3.0
     subscription_ttl_seconds: int = 60
     heartbeat_seconds: float = 15.0
