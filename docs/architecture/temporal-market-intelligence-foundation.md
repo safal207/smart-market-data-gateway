@@ -65,7 +65,9 @@ NO_SIGNAL -> WATCH -> CONFIRMED
                    -> EXPIRED
 ```
 
-`CONFIRMED`, `INVALIDATED`, and `EXPIRED` are terminal. Confirmation and invalidation require explicit evidence that was already known at the transition time, must include at least one evidence item received strictly after hypothesis creation, and must occur strictly before the declared deadline. Original supporting evidence may remain contextual evidence, but it cannot by itself be reused as proof that the predicted outcome happened. At the deadline, an unresolved hypothesis becomes `EXPIRED` rather than being retroactively confirmed.
+`CONFIRMED`, `INVALIDATED`, and `EXPIRED` are terminal. Confirmation and invalidation require explicit evidence that was already known at the transition time, must include at least one evidence item received strictly after hypothesis creation, and must occur strictly before the declared deadline. Original supporting evidence may remain contextual evidence, but it cannot by itself be reused as proof that the predicted outcome happened.
+
+At or after the deadline, `expire_due()` records an unresolved hypothesis as `EXPIRED` when the caller processes due hypotheses. This foundation does not include a scheduler, so expiry recording time may be later than the declared deadline; retroactive confirmation remains prohibited.
 
 Every transition is linked to the previous appended transition with canonical SHA-256 hashing. Independent hypotheses may interleave in append order, while time may not regress within one hypothesis. Editing a hypothesis, reason, timestamp, state, evidence reference, ordering, or chain link invalidates verification.
 
@@ -119,6 +121,7 @@ ledger.verify()
 - No statistical rule establishes causality; the ledger records claims and outcomes.
 - The in-memory temporal store is not durable and is intended as a domain foundation.
 - The SHA-256 prediction chain is tamper-evident, not externally signed or anchored.
+- Expiry processing requires the caller to invoke `expire_due()`; this foundation has no scheduler.
 - Evidence receipt timestamps depend on the integrity of the ingesting component's clock and provenance.
 - Evidence references identify their source through provenance and locator fields; richer first-class cross-asset relationship semantics remain future work.
 - Confidence is supplied by an upstream evaluator and is not calibrated here.
