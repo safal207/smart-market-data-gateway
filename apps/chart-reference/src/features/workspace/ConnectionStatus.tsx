@@ -5,6 +5,7 @@ const STATUS_LABELS: Record<WorkspaceConnectionState, string> = {
   connecting: "Connecting",
   live: "Live",
   stale: "Stale",
+  no_data: "No data",
   reconnecting: "Reconnecting",
   replay: "Synthetic replay",
   paused: "Display paused",
@@ -34,19 +35,30 @@ export function ConnectionStatus({
   lastUpdateMs,
   onReconnect,
 }: ConnectionStatusProps) {
-  const needsAction = state === "error" || state === "stopped";
+  const needsAction = state === "error" || state === "stopped" || state === "no_data";
+  const visualState = state === "no_data" ? "stale" : state;
 
   return (
     <section className="side-card" aria-labelledby="connection-title">
       <div className="side-card__heading">
         <h2 id="connection-title">Connection</h2>
-        <div className={`status-badge status-badge--${state}`} role="status" aria-live="polite">
+        <div
+          className={`status-badge status-badge--${visualState}`}
+          role="status"
+          aria-live="polite"
+        >
           <span aria-hidden="true" className="status-badge__dot" />
           {STATUS_LABELS[state]}
         </div>
       </div>
       {detail != null && detail !== "" ? (
-        <p className={state === "error" ? "connection-detail connection-detail--error" : "connection-detail"}>
+        <p
+          className={
+            state === "error"
+              ? "connection-detail connection-detail--error"
+              : "connection-detail"
+          }
+        >
           {detail}
         </p>
       ) : null}
