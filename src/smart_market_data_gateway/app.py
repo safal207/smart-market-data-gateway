@@ -26,6 +26,10 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from smart_market_data_gateway.candle_api import create_candle_router
+from smart_market_data_gateway.candle_archive import (
+    HybridCandleHistoryStore,
+    PostgresCandleArchive,
+)
 from smart_market_data_gateway.config import Settings, settings
 from smart_market_data_gateway.connections import ConnectionRegistry
 from smart_market_data_gateway.domain import (
@@ -73,6 +77,21 @@ def create_app(config: Settings | None = None) -> FastAPI:
         redis_client: Redis = Redis.from_url(config.redis_url, decode_responses=True)
         metrics = GatewayMetrics()
         store = RedisStore(redis_client, config)
+        archive: PostgresCandleArchive | None = None
+        if config.candle_archive_enabled and config.database_url:
+            candidate = PostgresCandleArchive(config)
+            try:
+                await candidate.start()
+            except Exception:
+                logger.warning(
+                    "Candle archive startup failed; serving Redis hot history only",
+                    extra={"event": "candle_archive_startup_failed"},
+                    exc_info=True,
+                )
+                await candidate.close()
+            else:
+                archive = candidate
+        candle_history = HybridCandleHistoryStore(store, archive, config)
         qos = QoSPolicyService(config)
         hub = ConnectionHub(metrics, qos)
         auth = AuthService(config, metrics)
@@ -98,6 +117,8 @@ def create_app(config: Settings | None = None) -> FastAPI:
         app.state.redis = redis_client
         app.state.metrics = metrics
         app.state.store = store
+        app.state.candle_history = candle_history
+        app.state.candle_archive = archive
         app.state.qos = qos
         app.state.hub = hub
         app.state.auth = auth
@@ -122,6 +143,8 @@ def create_app(config: Settings | None = None) -> FastAPI:
                     timeout=config.shutdown_timeout_seconds,
                 )
             await profiles.close()
+            if archive is not None:
+                await archive.close()
             await redis_client.aclose()
 
     app = FastAPI(
@@ -130,7 +153,8 @@ def create_app(config: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
         description=(
             "Adaptive market-data gateway with Redis Streams, aggregated subscriptions, "
-            "tier-based QoS, WebSocket delivery, and measurable efficiency benchmarks."
+            "tier-based QoS, hybrid Redis/Timescale candle history, WebSocket delivery, "
+            "and measurable efficiency benchmarks."
         ),
     )
 
@@ -186,7 +210,14 @@ def create_app(config: Settings | None = None) -> FastAPI:
         except RedisError:
             response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
             return {"status": "degraded", "redis": "unavailable"}
-        return {"status": "ok", "redis": "available"}
+        archive_status = (
+            "disabled"
+            if not config.candle_archive_enabled
+            else "available"
+            if request.app.state.candle_archive is not None
+            else "unavailable"
+        )
+        return {"status": "ok", "redis": "available", "candle_archive": archive_status}
 
     @app.get("/v1/quotes/{symbol}", tags=["quotes"])
     async def latest_quote(
@@ -258,11 +289,17 @@ def create_app(config: Settings | None = None) -> FastAPI:
     async def internal_stats(request: Request) -> dict[str, Any]:
         local = await request.app.state.hub.local_stats()
         global_stats = await request.app.state.subscriptions.refresh_metrics()
+        archive = request.app.state.candle_archive
         return {
             "local": local,
             "global": global_stats,
             "redis_pending_entries": await request.app.state.store.pending_count(),
             "usage_queue_dropped": request.app.state.usage.dropped,
+            "candle_archive": {
+                "enabled": config.candle_archive_enabled,
+                "available": archive is not None,
+                "timescale_enabled": bool(archive and archive.timescale_enabled),
+            },
         }
 
     @app.get("/metrics", include_in_schema=False)
