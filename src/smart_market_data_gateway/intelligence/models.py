@@ -1,10 +1,18 @@
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Annotated, Self
+from types import MappingProxyType
+from typing import Annotated, Mapping, Self
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+    model_validator,
+)
 
 from smart_market_data_gateway.domain.models import Symbol
 
@@ -12,6 +20,7 @@ Confidence = Annotated[Decimal, Field(ge=0, le=1)]
 Sha256Hex = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 NonNegativeInteger = Annotated[int, Field(ge=0)]
 MetricValue = Decimal | int | str | bool
+MetricMap = Mapping[str, MetricValue]
 
 
 class ObservationKind(StrEnum):
@@ -63,7 +72,7 @@ class EvidenceRef(BaseModel):
 
 
 class MarketObservation(BaseModel):
-    """One immutable fact known to the system at a precise knowledge time.
+    """One deeply immutable fact known at a precise knowledge time.
 
     `observed_at` is source/event time. `received_at` is when this system first
     learned the fact. Point-in-time analysis must filter on `received_at` to
@@ -79,7 +88,7 @@ class MarketObservation(BaseModel):
     received_at: datetime
     source: str = Field(min_length=1, max_length=128)
     fact: str = Field(min_length=1, max_length=1_000)
-    metrics: dict[str, MetricValue] = Field(default_factory=dict)
+    metrics: MetricMap = Field(default_factory=dict)
     confidence: Confidence = Decimal("1")
     evidence: tuple[EvidenceRef, ...] = Field(min_length=1)
     expires_at: datetime | None = None
@@ -91,6 +100,17 @@ class MarketObservation(BaseModel):
         if value is not None and (value.tzinfo is None or value.utcoffset() is None):
             raise ValueError("timestamps must include timezone information")
         return value
+
+    @field_validator("metrics", mode="after")
+    @classmethod
+    def freeze_metrics(cls, value: MetricMap) -> MetricMap:
+        if any(not key.strip() for key in value):
+            raise ValueError("metric names must not be blank")
+        return MappingProxyType(dict(value))
+
+    @field_serializer("metrics")
+    def serialize_metrics(self, value: MetricMap) -> dict[str, MetricValue]:
+        return dict(value)
 
     @model_validator(mode="after")
     def validate_temporal_bounds(self) -> Self:
