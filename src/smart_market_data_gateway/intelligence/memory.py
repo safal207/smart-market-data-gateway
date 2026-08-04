@@ -21,18 +21,20 @@ class TemporalMarketMemory:
         return len(self._observations)
 
     def append(self, observation: MarketObservation) -> bool:
-        """Append one observation.
+        """Append one validated, deeply immutable observation.
 
         Returns `True` when a new observation is stored and `False` for an exact
         idempotent replay. Reusing an observation ID with different content is a
-        hard integrity error.
+        hard integrity error. Revalidation closes unsafe `model_copy` or
+        `model_construct` bypasses at this public storage boundary.
         """
 
-        existing = self._observations.get(observation.observation_id)
+        validated = MarketObservation.model_validate(observation.model_dump(mode="python"))
+        existing = self._observations.get(validated.observation_id)
         if existing is None:
-            self._observations[observation.observation_id] = observation
+            self._observations[validated.observation_id] = validated
             return True
-        if existing == observation:
+        if existing == validated:
             return False
         raise ValueError("observation_id already exists with different content")
 
