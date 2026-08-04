@@ -38,6 +38,7 @@ Redis Streams provide durable, acknowledged processing. Redis Pub/Sub broadcasts
 ## Implemented capabilities
 
 - vendor-neutral provider adapter and deterministic mock provider;
+- disabled-by-default Coinbase Advanced Trade adapter for personal or internal research;
 - provider reconnect with capped exponential backoff, jitter, restored symbols, outage metrics, and alerts;
 - Redis Streams, consumer groups, stale-entry reclaim, bounded retries, dead-letter stream, and deduplication;
 - sequence gap and out-of-order detection with degraded-stream metadata;
@@ -73,7 +74,7 @@ Services:
 |---|---|
 | REST/OpenAPI | `http://localhost:8000/docs` |
 | WebSocket | `ws://localhost:8000/v1/stream` |
-| Collector | mock provider + control/quote streams |
+| Collector | selected provider + control/quote streams |
 | Usage writer | Redis usage stream → PostgreSQL |
 | Prometheus | `http://localhost:9090` |
 | Grafana | `http://localhost:3000` (`admin` / `admin`) |
@@ -135,6 +136,20 @@ python -m smart_market_data_gateway.recorder \
 
 The recorder writes only validated normalized quote rows. It skips duplicates, marks sequence gaps, preserves completed rows across reconnects, rolls back failed partial appends, and never stores the bearer token. Every retained rich-evidence field is covered by the same canonical ledger hash. See [TMI WebSocket recorder](docs/tmi-recorder.md) and [Market evidence schema 1.1](docs/market-evidence-schema.md).
 
+## Research-only real market data
+
+The Coinbase adapter is disabled by default. It may be enabled only after the operator personally reviews the current provider terms and explicitly selects the non-production `personal_research` profile:
+
+```bash
+export SMDG_ENVIRONMENT=research
+export SMDG_MARKET_DATA_PROVIDER=coinbase
+export SMDG_COINBASE_USE_MODE=personal_research
+export SMDG_COINBASE_MARKET_DATA_TERMS_ACCEPTED=true
+export SMDG_ALLOW_ANONYMOUS_DEV=false
+```
+
+Use Coinbase product identifiers such as `BTC-USD`. Raw recordings belong under `recordings/`, which is ignored by Git. Do not commit, attach, publish, redistribute, or use those recordings beyond the rights actually granted to you. See [Coinbase research provider](docs/coinbase-research-provider.md).
+
 ## Development
 
 ```bash
@@ -187,10 +202,11 @@ The CI smoke benchmark uploads raw JSON and Markdown artifacts. No simulated res
 - [WebSocket AsyncAPI](docs/asyncapi.yaml)
 - [TMI WebSocket recorder](docs/tmi-recorder.md)
 - [Market evidence schema 1.1](docs/market-evidence-schema.md)
+- [Coinbase research provider](docs/coinbase-research-provider.md)
 - [Public API compatibility manifest](contracts/public-api-v1.json)
 - [Benchmark methodology](docs/benchmark-methodology.md)
 - [Provider licensing checklist](docs/provider-licensing-checklist.md)
 
 ## Licensing warning
 
-Commercial redistribution, caching, non-display use, historical storage, and public benchmark publication depend on provider and exchange terms. The real-provider adapter remains a separate gated step; no commercial redistribution is enabled by this repository alone.
+Commercial redistribution, caching, non-display use, historical storage, derived analytics, model training, and public benchmark publication depend on provider and exchange terms. The Coinbase adapter is a local research integration, not a commercial market-data license, and no broader rights are enabled by this repository alone.
