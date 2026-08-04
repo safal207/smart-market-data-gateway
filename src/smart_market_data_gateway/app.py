@@ -25,6 +25,7 @@ from pydantic import ValidationError
 from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
+from smart_market_data_gateway.candle_api import create_candle_router
 from smart_market_data_gateway.config import Settings, settings
 from smart_market_data_gateway.connections import ConnectionRegistry
 from smart_market_data_gateway.domain import (
@@ -171,6 +172,8 @@ def create_app(config: Settings | None = None) -> FastAPI:
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="REST rate limit exceeded",
             )
+
+    app.include_router(create_candle_router(get_identity, enforce_rest_limit))
 
     @app.get("/health/live", tags=["health"])
     async def liveness() -> dict[str, str]:
