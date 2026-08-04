@@ -159,7 +159,7 @@ describe("ChartWorkspace", () => {
     );
 
     expect(screen.getByRole("status")).toHaveTextContent("Connecting");
-    expect(screen.getByText("Waiting for market data…")).toBeVisible();
+    expect(screen.getAllByText("Waiting for market data…")).toHaveLength(2);
     expect(screen.queryByText(/^Live$/)).not.toBeInTheDocument();
 
     act(() => {
