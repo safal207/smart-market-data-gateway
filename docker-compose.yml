@@ -14,11 +14,12 @@ services:
       start_period: 3s
 
   postgres:
-    image: postgres:17-alpine
+    image: timescale/timescaledb:2.28.3-pg17
     environment:
       POSTGRES_DB: smdg
       POSTGRES_USER: smdg
       POSTGRES_PASSWORD: smdg-local-only
+      TIMESCALEDB_TELEMETRY: "off"
     ports:
       - "5432:5432"
     volumes:
@@ -38,6 +39,10 @@ services:
       SMDG_ALLOW_DEV_TOKENS: "true"
       SMDG_ALLOW_ANONYMOUS_DEV: "true"
       SMDG_LOG_LEVEL: INFO
+      SMDG_STREAM_MAXLEN: "1000000"
+      SMDG_CANDLE_ARCHIVE_ENABLED: "true"
+      SMDG_CANDLE_ARCHIVE_RETENTION_SECONDS: "157680000"
+      SMDG_CANDLE_ARCHIVE_POOL_MAX_SIZE: "4"
     ports:
       - "8000:8000"
     depends_on:
@@ -70,6 +75,18 @@ services:
       - "9101"
     depends_on:
       redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  candle-archive:
+    build: .
+    command: ["python", "-m", "smart_market_data_gateway.candle_archive"]
+    environment:
+      <<: *gateway-environment
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
         condition: service_healthy
     restart: unless-stopped
 
