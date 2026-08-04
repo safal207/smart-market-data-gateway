@@ -104,7 +104,7 @@ export function MarketChart({
           </h2>
         </div>
         {latest == null ? (
-          <p className="crosshair-readout" role="status" aria-live="polite">
+          <p className="crosshair-readout" aria-live="polite">
             {emptyMessage}
           </p>
         ) : (
