@@ -64,7 +64,7 @@ def create_candle_router(
                     detail="end must not be in the future",
                 )
 
-        series: CandleSeries = await request.app.state.store.get_candles(
+        series: CandleSeries = await request.app.state.candle_history.get_candles(
             normalized,
             timeframe=timeframe,
             limit=limit,
