@@ -20,15 +20,16 @@ class RecoveringCandleArchiveSink(CandleArchiveSink):
             await self.start()
         while not self._closed:
             try:
-                messages = await self.store.read_group(
-                    self.config.quote_stream,
-                    self.config.candle_archive_group,
-                    self.consumer_name,
-                    count=200,
-                    block_ms=1000,
-                )
-                if not messages:
-                    messages = await self._claim_stale()
+                messages = await self._claim_stale()
+                if len(messages) < 200:
+                    new_messages = await self.store.read_group(
+                        self.config.quote_stream,
+                        self.config.candle_archive_group,
+                        self.consumer_name,
+                        count=200 - len(messages),
+                        block_ms=1000,
+                    )
+                    messages.extend(new_messages)
                 for stream_id, fields in messages:
                     await self._persist(stream_id, fields)
             except asyncio.CancelledError:
