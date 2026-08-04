@@ -10,7 +10,7 @@ Before enabling the adapter, review the current official documents:
 - [Advanced Trade WebSocket channels](https://docs.cdp.coinbase.com/coinbase-app/advanced-trade-apis/websocket/websocket-channels)
 - [Coinbase Market Data Terms of Use](https://www.coinbase.com/legal/market_data)
 
-The repository does not accept those terms on your behalf. The adapter requires an explicit local acknowledgement and refuses to connect in `production`.
+The repository does not accept those terms on your behalf. Every direct capture requires an explicit command-line acknowledgement and refuses to connect in `production`.
 
 The default profile is intentionally narrow:
 
@@ -22,9 +22,36 @@ The default profile is intentionally narrow:
 
 Obtain separate written rights before expanding any of those uses.
 
-## Enable locally
+## One-command private capture
 
-Keep the gateway on a private development machine and set:
+For the first local research session, the smallest path connects directly to the provider and writes the same TMI-compatible SHA-256 ledger without starting Redis, FastAPI, or the gateway recorder:
+
+```bash
+python -m smart_market_data_gateway.research_capture \
+  --symbol BTC-USD \
+  --output recordings/coinbase-btc-usd.jsonl \
+  --max-records 100 \
+  --max-seconds 60 \
+  --accept-current-market-data-terms
+```
+
+The acknowledgement flag must be supplied on every run. The command:
+
+- permits only a non-production personal-research session;
+- limits both duration and record count;
+- requires `.jsonl` output below a `recordings/` directory;
+- refuses to overwrite a non-empty ledger unless `--append` is explicit;
+- writes complete records through the atomic evidence-ledger writer;
+- verifies the entire ledger after capture;
+- prints only safe metadata: record counts, timestamps, session ID, and ledger head hash.
+
+The default output is a timestamped file under `recordings/`. To continue an existing verified chain intentionally, use `--append`.
+
+No real payload is uploaded, committed, attached to CI, or sent to TMI automatically. The resulting local file can be supplied to TMI only within the rights you actually hold.
+
+## Full gateway path
+
+For testing the complete Redis, API, WebSocket, and recorder topology, set:
 
 ```bash
 export SMDG_ENVIRONMENT=research
@@ -52,7 +79,7 @@ Subscribe with a private development token using Coinbase product IDs such as `B
 }
 ```
 
-To capture a local evidence ledger:
+To capture a local evidence ledger through the gateway WebSocket:
 
 ```bash
 export SMDG_RECORDER_TOKEN='dev-pro:bob'
@@ -80,6 +107,7 @@ The adapter subscribes to the public `ticker`, `market_trades`, and `heartbeats`
 
 - Public channels do not require JWT, but Coinbase recommends authentication for the most reliable connection.
 - The adapter uses local per-symbol sequence numbers because upstream channel sequence values are not a provider-neutral per-symbol sequence.
-- Reconnects are handled by the existing collector loop.
+- Reconnects are handled by the existing collector loop in the full gateway path.
+- The direct capture command intentionally runs one bounded provider session and does not hide repeated reconnects.
 - A local SHA-256 ledger is tamper-evident, not externally signed or timestamped.
 - The integration proves transport and normalization, not trading alpha, causality, or investment suitability.
