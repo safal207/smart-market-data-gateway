@@ -1,4 +1,5 @@
 import type { ChartCandle, ChartTheme } from "../../chart";
+import type { CandleHistoryState } from "../../history";
 import type { MarketDataOrigin } from "../../market-data";
 
 export type WorkspaceConnectionState =
@@ -41,6 +42,14 @@ export interface WorkspaceDiagnostics {
   readonly gaps: number;
 }
 
+export interface WorkspaceHistory {
+  readonly state: CandleHistoryState;
+  readonly count: number;
+  readonly source?: "observed_quote_aggregation";
+  readonly warnings: readonly string[];
+  readonly detail: string;
+}
+
 export interface ChartWorkspaceModel {
   readonly symbol: string;
   readonly symbolOptions: readonly string[];
@@ -58,6 +67,7 @@ export interface ChartWorkspaceModel {
   readonly precision: number;
   readonly activityLabel: "Volume" | "Updates" | "Activity";
   readonly diagnostics: WorkspaceDiagnostics;
+  readonly history?: WorkspaceHistory;
   readonly paused: boolean;
   readonly gatewayToken: string;
 }
