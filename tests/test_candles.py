@@ -45,6 +45,19 @@ def test_minute_candle_uses_event_time_for_open_and_close() -> None:
     assert candle.activity_count == 3
 
 
+def test_equal_timestamps_use_event_id_as_stable_tie_breaker() -> None:
+    timestamp = datetime(2026, 8, 4, 12, 0, 30, tzinfo=UTC)
+    candle = BaseMinuteCandle.from_quote(
+        make_quote(timestamp=timestamp, price="102", event_number=2)
+    )
+    candle = candle.with_quote(
+        make_quote(timestamp=timestamp, price="101", event_number=1)
+    )
+
+    assert candle.open == Decimal("101")
+    assert candle.close == Decimal("102")
+
+
 def test_higher_timeframe_aggregates_sparse_observed_minutes() -> None:
     start = datetime(2026, 8, 4, 12, 0, tzinfo=UTC)
     first = BaseMinuteCandle.from_quote(
@@ -79,19 +92,22 @@ def test_higher_timeframe_aggregates_sparse_observed_minutes() -> None:
     assert "trade volume is unavailable" in series.warnings[0]
 
 
-def test_current_bucket_is_explicitly_open() -> None:
+def test_partial_historical_bucket_is_omitted() -> None:
     start = datetime(2026, 8, 4, 12, 0, tzinfo=UTC)
     candle = BaseMinuteCandle.from_quote(
         make_quote(timestamp=start + timedelta(seconds=5), price="100", event_number=1)
+    ).with_quote(
+        make_quote(timestamp=start + timedelta(seconds=50), price="103", event_number=2)
     )
 
     series = aggregate_base_candles(
         symbol="AAPL",
-        timeframe="5m",
+        timeframe="1m",
         limit=1,
-        end=start + timedelta(minutes=3),
+        end=start + timedelta(seconds=30),
         retention_seconds=86_400,
         base_candles=[candle],
     )
 
-    assert series.data[0].closed is False
+    assert series.returned_count == 0
+    assert series.data == []
