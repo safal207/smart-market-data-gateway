@@ -45,7 +45,9 @@ export function HistoryStatus({ history }: HistoryStatusProps) {
         <details>
           <summary>Data limitations</summary>
           <ul>
-            {history.warnings.map((warning) => <li key={warning}>{warning}</li>)}
+            {history.warnings.map((warning, index) => (
+              <li key={`${index}-${warning}`}>{warning}</li>
+            ))}
           </ul>
         </details>
       ) : null}
