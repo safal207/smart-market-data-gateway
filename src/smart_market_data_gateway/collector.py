@@ -12,6 +12,8 @@ from smart_market_data_gateway.config import Settings, settings
 from smart_market_data_gateway.logging import configure_logging
 from smart_market_data_gateway.metrics import GatewayMetrics
 from smart_market_data_gateway.providers import (
+    CoinbaseResearchConfig,
+    CoinbaseResearchMarketDataProvider,
     MarketDataProvider,
     MockMarketDataProvider,
     MockProviderConfig,
@@ -180,6 +182,42 @@ class CollectorService:
         self._closed = True
 
 
+def build_provider(config: Settings) -> MarketDataProvider:
+    provider_name = config.market_data_provider.strip().lower()
+    if provider_name == "mock":
+        return MockMarketDataProvider(
+            MockProviderConfig(
+                interval_seconds=config.mock_interval_seconds,
+                duplicate_every=config.mock_duplicate_every,
+                fail_after_events=config.mock_fail_after_events,
+            )
+        )
+    if provider_name == "coinbase":
+        return CoinbaseResearchMarketDataProvider(
+            CoinbaseResearchConfig(
+                url=config.coinbase_ws_url,
+                use_mode=config.coinbase_use_mode,
+                market_data_terms_accepted=config.coinbase_market_data_terms_accepted,
+                environment=config.environment,
+                queue_size=config.coinbase_queue_size,
+            )
+        )
+    raise ValueError(f"unsupported market_data_provider: {config.market_data_provider}")
+
+
+def build_collector(
+    redis: Redis,
+    config: Settings,
+    metrics: GatewayMetrics | None = None,
+) -> CollectorService:
+    return CollectorService(
+        build_provider(config),
+        RedisStore(redis, config),
+        config,
+        metrics or GatewayMetrics(),
+    )
+
+
 def build_mock_collector(
     redis: Redis,
     config: Settings,
@@ -205,7 +243,7 @@ async def _run() -> None:
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
     metrics = GatewayMetrics()
     start_http_server(settings.collector_metrics_port, registry=metrics.registry)
-    collector = build_mock_collector(redis, settings, metrics)
+    collector = build_collector(redis, settings, metrics)
     try:
         await collector.run()
     finally:
