@@ -8,6 +8,7 @@ __pycache__/
 htmlcov/
 .venv/
 .env
+recordings/
 .idea/
 .vscode/
 .DS_Store
