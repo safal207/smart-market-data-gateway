@@ -166,7 +166,7 @@ describe("App", () => {
     });
     expect(screen.getByRole("status")).toHaveTextContent("Live");
     fireEvent.click(screen.getByRole("button", { name: "Pause display" }));
-    expect(screen.getByRole("status")).toHaveTextContent("Paused");
+    expect(screen.getByRole("status")).toHaveTextContent("Display paused");
 
     act(() => {
       vi.advanceTimersByTime(1_000);
