@@ -126,6 +126,13 @@ python -m smart_market_data_gateway.recorder \
   --max-records 100
 ```
 
+Verify the complete recording without credentials:
+
+```bash
+python -m smart_market_data_gateway.recorder \
+  --verify-ledger recordings/mock-session.jsonl
+```
+
 The recorder writes only validated normalized quote rows. It skips duplicates, marks sequence gaps, preserves completed rows across reconnects, rolls back failed partial appends, and never stores the bearer token. Every retained rich-evidence field is covered by the same canonical ledger hash. See [TMI WebSocket recorder](docs/tmi-recorder.md) and [Market evidence schema 1.1](docs/market-evidence-schema.md).
 
 ## Development
