@@ -338,7 +338,7 @@ class QuoteMessageRecorder:
         message: StreamMessage,
     ) -> tuple[QuoteEvent | None, dict[str, Any]]:
         if message.type == "quote":
-            quote_payload: object = message.data
+            quote_payload: object = message.data.get("quote", message.data)
             metadata = {"source_message_type": "quote", "stale": False}
         elif message.type == "snapshot":
             quote_payload = message.data.get("quote", message.data)
