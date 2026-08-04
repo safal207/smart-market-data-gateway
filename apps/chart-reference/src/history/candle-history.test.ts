@@ -40,21 +40,23 @@ const VALID_PAYLOAD = {
 
 describe("CandleHistoryClient", () => {
   it("loads and validates canonical history without persisting the bearer token", async () => {
-    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = new URL(String(input));
+    const fetcher = vi.fn((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = input instanceof URL
+        ? input
+        : new URL(typeof input === "string" ? input : input.url);
       expect(url.pathname).toBe("/v1/candles/AAPL.US");
       expect(url.searchParams.get("timeframe")).toBe("5m");
       expect(url.searchParams.get("limit")).toBe("500");
       expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer dev-pro:test-client");
       expect(url.toString()).not.toContain("dev-pro:test-client");
-      return new Response(JSON.stringify(VALID_PAYLOAD), {
+      return Promise.resolve(new Response(JSON.stringify(VALID_PAYLOAD), {
         status: 200,
         headers: { "Content-Type": "application/json" },
-      });
+      }));
     });
     const client = new CandleHistoryClient({
       baseUrl: "http://gateway.test:8000",
-      fetch: fetcher as typeof globalThis.fetch,
+      fetch: fetcher,
     });
 
     const series = await client.load({
@@ -77,12 +79,13 @@ describe("CandleHistoryClient", () => {
   });
 
   it("classifies a Basic tier denial as forbidden", async () => {
+    const fetcher = vi.fn((): Promise<Response> => Promise.resolve(new Response(
+      JSON.stringify({ detail: "historical data is not available for the basic tier" }),
+      { status: 403, headers: { "Content-Type": "application/json" } },
+    )));
     const client = new CandleHistoryClient({
       baseUrl: "http://gateway.test:8000",
-      fetch: vi.fn(async () => new Response(
-        JSON.stringify({ detail: "historical data is not available for the basic tier" }),
-        { status: 403, headers: { "Content-Type": "application/json" } },
-      )) as typeof globalThis.fetch,
+      fetch: fetcher,
     });
 
     await expect(client.load({ symbol: "AAPL.US", timeframe: "1m" })).rejects.toMatchObject({
@@ -93,12 +96,13 @@ describe("CandleHistoryClient", () => {
   });
 
   it("fails closed when the response count contradicts its data", async () => {
+    const fetcher = vi.fn((): Promise<Response> => Promise.resolve(new Response(JSON.stringify({
+      ...VALID_PAYLOAD,
+      returned_count: 2,
+    }), { status: 200, headers: { "Content-Type": "application/json" } })));
     const client = new CandleHistoryClient({
       baseUrl: "http://gateway.test:8000",
-      fetch: vi.fn(async () => new Response(JSON.stringify({
-        ...VALID_PAYLOAD,
-        returned_count: 2,
-      }), { status: 200, headers: { "Content-Type": "application/json" } })) as typeof globalThis.fetch,
+      fetch: fetcher,
     });
 
     await expect(client.load({ symbol: "AAPL.US", timeframe: "5m" })).rejects.toMatchObject({
@@ -142,7 +146,7 @@ describe("CandleHistoryLoader", () => {
 
   it("normalizes unexpected transport failures", async () => {
     const loader = new CandleHistoryLoader({
-      load: async () => { throw new Error("boom"); },
+      load: () => Promise.reject(new Error("boom")),
     });
     const result = await loader.load({ symbol: "AAPL.US", timeframe: "1m" });
     expect(result.kind).toBe("failure");
