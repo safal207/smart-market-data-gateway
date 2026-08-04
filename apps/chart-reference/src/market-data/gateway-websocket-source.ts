@@ -312,7 +312,7 @@ export class GatewayWebSocketSource implements MarketDataSource {
           origin: "live",
           generation,
           stale: false,
-          ageMs: Math.max(0, this.scheduler.now() - quote.receivedAtMs),
+          ageMs: 0,
           ...(requestId == null ? {} : { requestId }),
         });
         return;
