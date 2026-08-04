@@ -108,6 +108,12 @@ def _mapping_value(mapping: Mapping[Any, Any], key: str, default: Any = None) ->
     return default
 
 
+def _text(value: Any) -> str:
+    if isinstance(value, bytes):
+        return value.decode()
+    return str(value)
+
+
 def _stream_id_age_seconds(stream_id: str, now_ms: int) -> float:
     try:
         timestamp_ms = int(stream_id.split("-", 1)[0])
@@ -125,7 +131,7 @@ async def _first_stream_entry_age_seconds(
     rows = await redis.xrange(stream, min=minimum, max="+", count=1)
     if not rows:
         return 0.0
-    return _stream_id_age_seconds(str(rows[0][0]), now_ms)
+    return _stream_id_age_seconds(_text(rows[0][0]), now_ms)
 
 
 async def collect_candle_archive_consumer_health(
@@ -149,7 +155,7 @@ async def collect_candle_archive_consumer_health(
 
     selected: Mapping[Any, Any] | None = None
     for candidate in groups:
-        if str(_mapping_value(candidate, "name", "")) == group:
+        if _text(_mapping_value(candidate, "name", "")) == group:
             selected = candidate
             break
 
@@ -173,10 +179,14 @@ async def collect_candle_archive_consumer_health(
         )
 
     pending = int(_mapping_value(selected, "pending", 0) or 0)
-    raw_lag = _mapping_value(selected, "lag", 0)
-    undelivered = max(0, int(raw_lag or 0))
+    raw_lag = _mapping_value(selected, "lag")
+    if raw_lag is None:
+        raise ValueError("Redis did not report archive consumer-group lag")
+    undelivered = max(0, int(raw_lag))
     consumers = int(_mapping_value(selected, "consumers", 0) or 0)
-    last_delivered_id = str(_mapping_value(selected, "last-delivered-id", "0-0"))
+    last_delivered_id = _text(
+        _mapping_value(selected, "last-delivered-id", "0-0")
+    )
 
     ages: list[float] = []
     if pending:
@@ -189,7 +199,7 @@ async def collect_candle_archive_consumer_health(
         )
         if pending_rows:
             message_id = _mapping_value(pending_rows[0], "message_id", "0-0")
-            ages.append(_stream_id_age_seconds(str(message_id), now_ms))
+            ages.append(_stream_id_age_seconds(_text(message_id), now_ms))
 
     if undelivered:
         minimum = "-" if last_delivered_id == "0-0" else f"({last_delivered_id}"
