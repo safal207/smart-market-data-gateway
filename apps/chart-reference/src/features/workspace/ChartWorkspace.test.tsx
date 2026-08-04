@@ -79,6 +79,13 @@ describe("ChartWorkspace", () => {
     expect(handlers.selectTheme).toHaveBeenCalledWith("light");
   });
 
+  it("locks timeframe context while the display is paused", () => {
+    render(<ChartWorkspace model={{ ...model, paused: true }} actions={actions()} />);
+    expect(screen.getByRole("combobox", { name: "Timeframe" })).toBeDisabled();
+    expect(screen.getByText("Resume the display before changing timeframe.")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Resume display" })).toBeVisible();
+  });
+
   it("labels the local token as memory-only and forwards it without persistence", async () => {
     const handlers = actions();
     const user = userEvent.setup();
