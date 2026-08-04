@@ -90,6 +90,66 @@ class GatewayMetrics:
             "Pending entries for the processing consumer group",
             registry=self.registry,
         )
+        self.candle_archive_enabled = Gauge(
+            "smdg_candle_archive_enabled",
+            "Whether durable candle archiving is enabled",
+            registry=self.registry,
+        )
+        self.candle_archive_monitor_up = Gauge(
+            "smdg_candle_archive_monitor_up",
+            "Whether the most recent archive consumer health sample succeeded",
+            registry=self.registry,
+        )
+        self.candle_archive_consumer_group_present = Gauge(
+            "smdg_candle_archive_consumer_group_present",
+            "Whether the configured archive Redis consumer group exists",
+            registry=self.registry,
+        )
+        self.candle_archive_consumers = Gauge(
+            "smdg_candle_archive_consumers",
+            "Consumers registered in the candle archive Redis group",
+            registry=self.registry,
+        )
+        self.candle_archive_stream_length_entries = Gauge(
+            "smdg_candle_archive_stream_length_entries",
+            "Entries currently retained in the shared quote stream",
+            registry=self.registry,
+        )
+        self.candle_archive_pending_entries = Gauge(
+            "smdg_candle_archive_pending_entries",
+            "Quote entries delivered to archive consumers but not acknowledged",
+            registry=self.registry,
+        )
+        self.candle_archive_undelivered_entries = Gauge(
+            "smdg_candle_archive_undelivered_entries",
+            "Quote entries not yet delivered to the candle archive group",
+            registry=self.registry,
+        )
+        self.candle_archive_backlog_entries = Gauge(
+            "smdg_candle_archive_backlog_entries",
+            "Pending plus undelivered quote entries for the candle archive",
+            registry=self.registry,
+        )
+        self.candle_archive_backlog_ratio = Gauge(
+            "smdg_candle_archive_backlog_ratio",
+            "Archive backlog divided by configured quote stream max length",
+            registry=self.registry,
+        )
+        self.candle_archive_trim_headroom_entries = Gauge(
+            "smdg_candle_archive_trim_headroom_entries",
+            "Remaining stream entries before archive backlog reaches configured max length",
+            registry=self.registry,
+        )
+        self.candle_archive_oldest_backlog_age_seconds = Gauge(
+            "smdg_candle_archive_oldest_backlog_age_seconds",
+            "Age of the oldest pending or undelivered archive stream entry",
+            registry=self.registry,
+        )
+        self.candle_archive_monitor_errors = Counter(
+            "smdg_candle_archive_monitor_errors_total",
+            "Archive consumer health sampling failures",
+            registry=self.registry,
+        )
         self.auth_failures = Counter(
             "smdg_auth_failures_total",
             "Authentication or authorization failures",
