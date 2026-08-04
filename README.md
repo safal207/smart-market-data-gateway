@@ -45,6 +45,7 @@ Redis Streams provide durable, acknowledged processing. Redis Pub/Sub broadcasts
 - one global upstream transition for identical client subscriptions;
 - REST endpoints for one or many latest quotes, including stale-data metadata and partial results;
 - authenticated WebSocket subscribe/unsubscribe, snapshots, heartbeat, idle cleanup, and machine-readable errors;
+- append-only WebSocket JSONL recording for deterministic TMI replay;
 - Basic, Pro, and Premium symbol, connection, operation, and update-frequency policies;
 - optional Client Profile / Entitlements API integration with timeout, retry, cache, and fallback;
 - distributed token-bucket burst and sustained limits;
@@ -112,6 +113,20 @@ WebSocket commands:
 }
 ```
 
+## Record a TMI replay session
+
+```bash
+export SMDG_RECORDER_TOKEN='dev-pro:bob'
+smdg-recorder \
+  --url ws://localhost:8000/v1/stream \
+  --symbol AAPL \
+  --symbol TSLA \
+  --output recordings/mock-session.jsonl \
+  --max-records 100
+```
+
+The recorder writes only validated normalized quote rows. It skips duplicates, marks sequence gaps, preserves completed rows across reconnects, rolls back failed partial appends, and never stores the bearer token. See [TMI WebSocket recorder](docs/tmi-recorder.md).
+
 ## Development
 
 ```bash
@@ -162,6 +177,7 @@ The CI smoke benchmark uploads raw JSON and Markdown artifacts. No simulated res
 - [End-to-end quote flow](docs/architecture/quote-flow.md)
 - [Architecture decisions](docs/architecture/adr/)
 - [WebSocket AsyncAPI](docs/asyncapi.yaml)
+- [TMI WebSocket recorder](docs/tmi-recorder.md)
 - [Public API compatibility manifest](contracts/public-api-v1.json)
 - [Benchmark methodology](docs/benchmark-methodology.md)
 - [Provider licensing checklist](docs/provider-licensing-checklist.md)
