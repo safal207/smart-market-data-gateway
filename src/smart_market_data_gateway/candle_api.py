@@ -48,18 +48,27 @@ def create_candle_router(
             )
 
         await enforce_rest_limit(request, identity)
-        effective_end = end or datetime.now(UTC)
-        if effective_end.tzinfo is None or effective_end.utcoffset() is None:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="end must include timezone information",
-            )
+        now = datetime.now(UTC)
+        if end is None:
+            effective_end = now
+        else:
+            if end.tzinfo is None or end.utcoffset() is None:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="end must include timezone information",
+                )
+            effective_end = end.astimezone(UTC)
+            if effective_end > now:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="end must not be in the future",
+                )
 
         series: CandleSeries = await request.app.state.store.get_candles(
             normalized,
             timeframe=timeframe,
             limit=limit,
-            end=effective_end.astimezone(UTC),
+            end=effective_end,
         )
         request.app.state.usage.record(
             idempotency_key=f"rest-candles:{identity.client_id}:{normalized}:{uuid4()}",
