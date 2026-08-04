@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 import logging
 
+from prometheus_client import start_http_server
 from pydantic import ValidationError
 from redis.asyncio import Redis
 
+from smart_market_data_gateway.archive_observability import (
+    CandleArchiveMetrics,
+    CandleArchiveMonitor,
+)
 from smart_market_data_gateway.candle_archive import CandleArchiveSink
 from smart_market_data_gateway.config import Settings, settings
 from smart_market_data_gateway.domain import QuoteEvent
@@ -113,9 +119,35 @@ async def _run() -> None:
     configure_logging(settings.log_level)
     redis = Redis.from_url(settings.redis_url, decode_responses=True)
     sink = RecoveringCandleArchiveSink(redis, settings)
+    metrics = CandleArchiveMetrics(settings)
+    monitor = CandleArchiveMonitor(redis, settings, metrics)
+    monitor_task: asyncio.Task[None] | None = None
     try:
+        await sink.start()
+        try:
+            start_http_server(
+                settings.candle_archive_metrics_port,
+                registry=metrics.registry,
+            )
+        except OSError:
+            logger.warning(
+                "Candle archive metrics server failed to bind; archiving continues",
+                extra={"event": "candle_archive_metrics_bind_failed"},
+                exc_info=True,
+            )
+        monitor_task = asyncio.create_task(
+            monitor.run(),
+            name="candle-archive-monitor",
+        )
         await sink.run()
     finally:
+        await monitor.close()
+        if monitor_task is not None:
+            with suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(monitor_task, timeout=1.0)
+            if not monitor_task.done():
+                monitor_task.cancel()
+                await asyncio.gather(monitor_task, return_exceptions=True)
         await sink.close()
         await redis.aclose()
 
