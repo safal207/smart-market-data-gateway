@@ -6,7 +6,7 @@ import { HISTORY_TOKEN_SETTLE_MS, useDebouncedValue } from "./use-candle-history
 describe("useDebouncedValue", () => {
   afterEach(() => vi.useRealTimers());
 
-  it("publishes only the final credential after the settle window", () => {
+  it("publishes only the final credential after the settle window", async () => {
     vi.useFakeTimers();
     const { result, rerender } = renderHook(
       ({ token }: { readonly token: string }) => useDebouncedValue(token, HISTORY_TOKEN_SETTLE_MS),
@@ -18,9 +18,9 @@ describe("useDebouncedValue", () => {
     rerender({ token: "dev-pro:chart-reference" });
 
     expect(result.current).toBe("dev-basic:old");
-    act(() => vi.advanceTimersByTime(HISTORY_TOKEN_SETTLE_MS - 1));
+    await act(() => vi.advanceTimersByTimeAsync(HISTORY_TOKEN_SETTLE_MS - 1));
     expect(result.current).toBe("dev-basic:old");
-    act(() => vi.advanceTimersByTime(1));
+    await act(() => vi.advanceTimersByTimeAsync(1));
     expect(result.current).toBe("dev-pro:chart-reference");
   });
 });
