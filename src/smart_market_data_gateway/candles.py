@@ -46,8 +46,10 @@ def history_window(
         raise ValueError("end must include timezone information")
     interval_seconds = timeframe_seconds(timeframe)
     effective_end = end.astimezone(UTC)
-    last_bucket = floor_time(effective_end, interval_seconds)
-    start = last_bucket - timedelta(seconds=interval_seconds * (limit - 1))
+    last_closed_bucket = floor_time(effective_end, interval_seconds) - timedelta(
+        seconds=interval_seconds
+    )
+    start = last_closed_bucket - timedelta(seconds=interval_seconds * (limit - 1))
     return start, effective_end
 
 
@@ -164,6 +166,7 @@ class CandleSeries(BaseModel):
         default_factory=lambda: [
             "Candles are aggregated from observed quote prices; trade volume is unavailable.",
             "Intervals with no accepted quote observations are omitted.",
+            "Only fully closed intervals at or before period_end are returned.",
         ]
     )
 
@@ -190,7 +193,8 @@ def aggregate_base_candles(
 
     for candle in sorted(base_candles, key=lambda item: item.open_time):
         bucket = floor_time(candle.open_time, interval_seconds)
-        if bucket < start or bucket > effective_end:
+        bucket_end = bucket + timedelta(seconds=interval_seconds)
+        if bucket < start or bucket_end > effective_end:
             continue
         grouped.setdefault(bucket, []).append(candle)
 
@@ -198,6 +202,9 @@ def aggregate_base_candles(
     for bucket in sorted(grouped):
         observations = grouped[bucket]
         bucket_end = bucket + timedelta(seconds=interval_seconds)
+        last_observation = max(item.last_provider_timestamp for item in observations)
+        if last_observation > effective_end:
+            continue
         data.append(
             Candle(
                 symbol=symbol,
@@ -210,8 +217,8 @@ def aggregate_base_candles(
                 close=observations[-1].close,
                 activity_count=sum(item.activity_count for item in observations),
                 first_observation=min(item.first_provider_timestamp for item in observations),
-                last_observation=max(item.last_provider_timestamp for item in observations),
-                closed=bucket_end <= effective_end,
+                last_observation=last_observation,
+                closed=True,
             )
         )
 
