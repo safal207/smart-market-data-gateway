@@ -45,6 +45,8 @@ Redis Streams provide durable, acknowledged processing. Redis Pub/Sub broadcasts
 - one global upstream transition for identical client subscriptions;
 - REST endpoints for one or many latest quotes, including stale-data metadata and partial results;
 - authenticated WebSocket subscribe/unsubscribe, snapshots, heartbeat, idle cleanup, and machine-readable errors;
+- append-only WebSocket JSONL recording with SHA-256 evidence-ledger verification for deterministic TMI replay;
+- backward-compatible `QuoteEvent` 1.1 evidence for volume, aggressor flow, trade count, and top-of-book depth with explicit capabilities and units;
 - Basic, Pro, and Premium symbol, connection, operation, and update-frequency policies;
 - optional Client Profile / Entitlements API integration with timeout, retry, cache, and fallback;
 - distributed token-bucket burst and sustained limits;
@@ -112,6 +114,20 @@ WebSocket commands:
 }
 ```
 
+## Record a TMI replay session
+
+```bash
+export SMDG_RECORDER_TOKEN='dev-pro:bob'
+python -m smart_market_data_gateway.recorder \
+  --url ws://localhost:8000/v1/stream \
+  --symbol AAPL \
+  --symbol TSLA \
+  --output recordings/mock-session.jsonl \
+  --max-records 100
+```
+
+The recorder writes only validated normalized quote rows. It skips duplicates, marks sequence gaps, preserves completed rows across reconnects, rolls back failed partial appends, and never stores the bearer token. Every retained rich-evidence field is covered by the same canonical ledger hash. See [TMI WebSocket recorder](docs/tmi-recorder.md) and [Market evidence schema 1.1](docs/market-evidence-schema.md).
+
 ## Development
 
 ```bash
@@ -162,6 +178,8 @@ The CI smoke benchmark uploads raw JSON and Markdown artifacts. No simulated res
 - [End-to-end quote flow](docs/architecture/quote-flow.md)
 - [Architecture decisions](docs/architecture/adr/)
 - [WebSocket AsyncAPI](docs/asyncapi.yaml)
+- [TMI WebSocket recorder](docs/tmi-recorder.md)
+- [Market evidence schema 1.1](docs/market-evidence-schema.md)
 - [Public API compatibility manifest](contracts/public-api-v1.json)
 - [Benchmark methodology](docs/benchmark-methodology.md)
 - [Provider licensing checklist](docs/provider-licensing-checklist.md)
