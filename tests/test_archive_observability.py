@@ -1,5 +1,6 @@
 from prometheus_client import generate_latest
 
+from smart_market_data_gateway import archive_observability
 from smart_market_data_gateway.archive_observability import (
     CandleArchiveMetrics,
     CandleArchiveMonitor,
@@ -95,3 +96,25 @@ async def test_archive_monitor_exports_trim_safety_metrics(
     assert "smdg_candle_archive_backlog_entries 2.0" in payload
     assert "smdg_candle_archive_backlog_ratio 0.5" in payload
     assert "smdg_candle_archive_trim_headroom_entries 2.0" in payload
+
+
+async def test_archive_monitor_marks_unexpected_sampling_error_down(
+    monkeypatch,
+    redis_client,
+    test_settings,
+) -> None:
+    async def raise_runtime_error(*args, **kwargs):
+        raise RuntimeError("unsupported sample")
+
+    monkeypatch.setattr(
+        archive_observability,
+        "collect_candle_archive_consumer_health",
+        raise_runtime_error,
+    )
+    metrics = CandleArchiveMetrics(test_settings)
+    monitor = CandleArchiveMonitor(redis_client, test_settings, metrics)
+
+    assert await monitor.sample() is None
+    payload = generate_latest(metrics.registry).decode()
+    assert "smdg_candle_archive_monitor_up 0.0" in payload
+    assert "smdg_candle_archive_monitor_errors_total 1.0" in payload
