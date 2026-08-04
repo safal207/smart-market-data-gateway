@@ -20,49 +20,37 @@ export interface ChartWorkspaceProps {
 
 export function ChartWorkspace({ model, actions }: ChartWorkspaceProps) {
   const waitingForGatewayData =
-    model.sourceMode === "gateway" &&
-    model.connectionState === "live" &&
-    model.quote == null;
+    model.sourceMode === "gateway" && model.connectionState === "live" && model.quote == null;
   const [firstDataTimedOut, setFirstDataTimedOut] = useState(false);
 
   useEffect(() => {
     setFirstDataTimedOut(false);
     if (!waitingForGatewayData) return undefined;
-    const timer = window.setTimeout(() => {
-      setFirstDataTimedOut(true);
-    }, FIRST_MARKET_DATA_TIMEOUT_MS);
+    const timer = window.setTimeout(() => setFirstDataTimedOut(true), FIRST_MARKET_DATA_TIMEOUT_MS);
     return () => window.clearTimeout(timer);
   }, [model.symbol, model.timeframe, waitingForGatewayData]);
 
   const effectiveConnectionState: WorkspaceConnectionState = waitingForGatewayData
-    ? firstDataTimedOut
-      ? "no_data"
-      : "connecting"
+    ? firstDataTimedOut ? "no_data" : "connecting"
     : model.connectionState;
   const effectiveConnectionDetail = waitingForGatewayData
     ? firstDataTimedOut
       ? "The gateway is connected, but no market data arrived for this instrument. Check the symbol, permissions, provider session, or reconnect."
       : "Connected to the gateway. Waiting for the first market-data update before marking the stream Live."
     : model.connectionDetail;
-  const emptyMessage =
-    model.sourceMode === "replay"
-      ? "Waiting for replay data…"
-      : firstDataTimedOut
-        ? "No market data is available for this instrument and timeframe."
-        : "Waiting for market data…";
+  const emptyMessage = model.sourceMode === "replay"
+    ? "Waiting for replay data…"
+    : firstDataTimedOut
+      ? "No market data is available for this instrument and timeframe."
+      : "Waiting for market data…";
 
   return (
     <div className="app-shell" data-theme={model.theme}>
-      <a className="skip-link" href="#chart-workspace-main">
-        Skip to chart workspace
-      </a>
+      <a className="skip-link" href="#chart-workspace-main">Skip to chart workspace</a>
       <header className="topbar">
         <div className="brand-lockup">
           <span className="brand-mark" aria-hidden="true">SM</span>
-          <div>
-            <p className="eyebrow">Smart Market Data Gateway</p>
-            <h1>Market Chart Reference</h1>
-          </div>
+          <div><p className="eyebrow">Smart Market Data Gateway</p><h1>Market Chart Reference</h1></div>
         </div>
         <span className="environment-tag">
           {model.sourceMode === "replay" ? "Synthetic data" : "Local gateway"}
@@ -121,7 +109,7 @@ export function ChartWorkspace({ model, actions }: ChartWorkspaceProps) {
           <a href="https://www.tradingview.com/" target="_blank" rel="noreferrer">
             TradingView Lightweight Charts™
           </a>
-          . Copyright (с) 2025 TradingView, Inc.
+          . Copyright © 2025 TradingView, Inc.
         </p>
         <p>Reference display only. No trading or investment advice.</p>
       </footer>

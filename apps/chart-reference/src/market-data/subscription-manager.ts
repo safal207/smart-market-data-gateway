@@ -7,14 +7,8 @@ import {
 import { symbolSchema } from "./types";
 
 export type MarketDataChannel = "quote";
-
-export interface SubscriptionKey {
-  readonly channel: MarketDataChannel;
-  readonly symbol: string;
-}
-
+export interface SubscriptionKey { readonly channel: MarketDataChannel; readonly symbol: string; }
 export type ManagedSubscriptionStatus = "pending" | "live";
-
 export interface ManagedSubscription {
   readonly key: SubscriptionKey;
   readonly refCount: number;
@@ -22,7 +16,6 @@ export interface ManagedSubscription {
   readonly status: ManagedSubscriptionStatus;
   readonly generation: number;
 }
-
 export interface SubscriptionManagerSnapshot {
   readonly generation: number;
   readonly sourceStatus: SourceStatus;
@@ -30,12 +23,10 @@ export interface SubscriptionManagerSnapshot {
   readonly totalReferences: number;
   readonly uniqueSubscriptions: number;
 }
-
 export interface SmartSubscriptionManagerOptions {
   readonly autoStart?: boolean;
   readonly stopSourceOnDispose?: boolean;
 }
-
 type ManagerListener = () => void;
 type DataListener = (point: MarketDataPoint) => void;
 
@@ -54,10 +45,7 @@ export class SmartSubscriptionManager {
   private snapshot: SubscriptionManagerSnapshot;
   private disposed = false;
 
-  constructor(
-    readonly source: MarketDataSource,
-    options: SmartSubscriptionManagerOptions = {},
-  ) {
+  constructor(readonly source: MarketDataSource, options: SmartSubscriptionManagerOptions = {}) {
     this.autoStart = options.autoStart ?? true;
     this.stopSourceOnDispose = options.stopSourceOnDispose ?? true;
     this.sourceStatus = source.getStatus();
@@ -76,8 +64,6 @@ export class SmartSubscriptionManager {
       } else if (event.type === "market-data") {
         const key = serializeKey({ channel: "quote", symbol: event.quote.symbol });
         if (!this.references.has(key)) return;
-        // Snapshots are valid before the subscribe ack; generation, not ack order, fences them.
-        // A current-generation live quote is the explicit fallback when no cache snapshot exists.
         if (!event.stale) {
           const changed = !this.freshSymbols.has(event.quote.symbol);
           this.freshSymbols.add(event.quote.symbol);
@@ -96,10 +82,7 @@ export class SmartSubscriptionManager {
     });
   }
 
-  subscribe(
-    consumerId: string,
-    input: SubscriptionKey | string,
-  ): Unsubscribe {
+  subscribe(consumerId: string, input: SubscriptionKey | string): Unsubscribe {
     this.assertUsable();
     const key = normalizeKey(input);
     const normalizedConsumerId = nonEmptyConsumer(consumerId);
@@ -131,11 +114,7 @@ export class SmartSubscriptionManager {
     const serialized = serializeKey(key);
     const consumers = this.references.get(serialized);
     if (consumers == null || !consumers.delete(normalizedConsumerId)) return;
-    if (consumers.size === 0) {
-      this.references.delete(serialized);
-      this.acknowledgedSymbols.delete(key.symbol);
-      this.freshSymbols.delete(key.symbol);
-    }
+    if (consumers.size === 0) this.forgetSubscription(serialized);
     this.syncDesiredSymbols();
     this.publishSnapshot();
   }
@@ -151,7 +130,7 @@ export class SmartSubscriptionManager {
     for (const [serialized, consumers] of this.references) {
       if (consumers.has(normalizedConsumerId) && !desired.has(serialized)) {
         consumers.delete(normalizedConsumerId);
-        if (consumers.size === 0) this.references.delete(serialized);
+        if (consumers.size === 0) this.forgetSubscription(serialized);
         changed = true;
       }
     }
@@ -168,40 +147,22 @@ export class SmartSubscriptionManager {
     }
     if (!changed) return;
     this.syncDesiredSymbols();
-    if (this.references.size > 0 && this.autoStart && isStartable(this.sourceStatus.state)) {
-      this.source.start();
-    }
+    if (this.references.size > 0 && this.autoStart && isStartable(this.sourceStatus.state)) this.source.start();
     this.publishSnapshot();
   }
 
-  start(): void {
-    this.assertUsable();
-    this.source.start();
-  }
-
-  stop(): void {
-    if (this.disposed) return;
-    this.source.stop();
-  }
-
+  start(): void { this.assertUsable(); this.source.start(); }
+  stop(): void { if (!this.disposed) this.source.stop(); }
   subscribeSnapshot(listener: ManagerListener): Unsubscribe {
     this.managerListeners.add(listener);
     return () => this.managerListeners.delete(listener);
   }
-
-  /** Alias matching the useSyncExternalStore store contract. */
-  onChange(listener: ManagerListener): Unsubscribe {
-    return this.subscribeSnapshot(listener);
-  }
-
+  onChange(listener: ManagerListener): Unsubscribe { return this.subscribeSnapshot(listener); }
   subscribeData(listener: DataListener): Unsubscribe {
     this.dataListeners.add(listener);
     return () => this.dataListeners.delete(listener);
   }
-
-  getSnapshot(): SubscriptionManagerSnapshot {
-    return this.snapshot;
-  }
+  getSnapshot(): SubscriptionManagerSnapshot { return this.snapshot; }
 
   dispose(): void {
     if (this.disposed) return;
@@ -217,18 +178,21 @@ export class SmartSubscriptionManager {
     if (this.stopSourceOnDispose) this.source.stop();
   }
 
-  private syncDesiredSymbols(): void {
-    const symbols = [...this.references.keys()]
-      .map((serialized) => deserializeKey(serialized).symbol)
-      .sort();
-    this.source.replaceSymbols(symbols);
+  private forgetSubscription(serialized: string): void {
+    this.references.delete(serialized);
+    const { symbol } = deserializeKey(serialized);
+    this.acknowledgedSymbols.delete(symbol);
+    this.freshSymbols.delete(symbol);
   }
 
+  private syncDesiredSymbols(): void {
+    const symbols = [...this.references.keys()].map((serialized) => deserializeKey(serialized).symbol).sort();
+    this.source.replaceSymbols(symbols);
+  }
   private publishSnapshot(): void {
     this.snapshot = this.buildSnapshot();
     for (const listener of [...this.managerListeners]) listener();
   }
-
   private buildSnapshot(): SubscriptionManagerSnapshot {
     const subscriptions = [...this.references.entries()]
       .map(([serialized, consumers]): ManagedSubscription => {
@@ -237,12 +201,10 @@ export class SmartSubscriptionManager {
           key: Object.freeze(key),
           refCount: consumers.size,
           consumers: Object.freeze([...consumers].sort()),
-          status:
-            this.sourceStatus.state === "live" &&
-            this.acknowledgedSymbols.has(key.symbol) &&
-            this.freshSymbols.has(key.symbol)
-              ? "live"
-              : "pending",
+          status: this.sourceStatus.state === "live"
+            && this.acknowledgedSymbols.has(key.symbol)
+            && this.freshSymbols.has(key.symbol)
+            ? "live" : "pending",
           generation: this.sourceStatus.generation,
         });
       })
@@ -255,42 +217,27 @@ export class SmartSubscriptionManager {
       uniqueSubscriptions: subscriptions.length,
     });
   }
-
   private assertUsable(): void {
     if (this.disposed) throw new Error("SmartSubscriptionManager is disposed");
   }
 }
 
 function normalizeKey(input: SubscriptionKey | string): SubscriptionKey {
-  const candidate =
-    typeof input === "string"
-      ? { channel: "quote" as const, symbol: input }
-      : input;
-  if (candidate.channel !== "quote") {
-    throw new Error("Unsupported market-data channel");
-  }
+  const candidate = typeof input === "string" ? { channel: "quote" as const, symbol: input } : input;
+  if (candidate.channel !== "quote") throw new Error("Unsupported market-data channel");
   const symbol = symbolSchema.parse(candidate.symbol.trim().toUpperCase());
   return Object.freeze({ channel: "quote", symbol });
 }
-
-function serializeKey(key: SubscriptionKey): string {
-  return `${key.channel}:${key.symbol}`;
-}
-
+function serializeKey(key: SubscriptionKey): string { return `${key.channel}:${key.symbol}`; }
 function deserializeKey(serialized: string): SubscriptionKey {
   const separator = serialized.indexOf(":");
-  return {
-    channel: serialized.slice(0, separator) as MarketDataChannel,
-    symbol: serialized.slice(separator + 1),
-  };
+  return { channel: serialized.slice(0, separator) as MarketDataChannel, symbol: serialized.slice(separator + 1) };
 }
-
 function nonEmptyConsumer(consumerId: string): string {
   const normalized = consumerId.trim();
   if (!normalized) throw new Error("consumerId must not be empty");
   return normalized;
 }
-
 function isStartable(state: SourceStatus["state"]): boolean {
   return state === "idle" || state === "stopped";
 }

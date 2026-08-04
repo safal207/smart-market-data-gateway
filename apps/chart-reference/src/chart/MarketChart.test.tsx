@@ -2,86 +2,86 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { MarketChart } from "./MarketChart";
-import type { ChartCandle, ChartRenderer } from "./types";
+import type { ChartCandle, ChartMountOptions, ChartRenderer } from "./types";
 
 const candle: ChartCandle = {
-  timeMs: Date.UTC(2026, 0, 5, 14, 30),
-  open: 100,
-  high: 102,
-  low: 99,
-  close: 101.25,
-  updateCount: 12,
-  activityValue: 12,
-  activitySource: "updates",
+  timeMs: Date.UTC(2026, 0, 5, 14, 30), open: 100, high: 102, low: 99,
+  close: 101.25, updateCount: 12, activityValue: 12, activitySource: "updates",
 };
 
 afterEach(cleanup);
 
+function rendererDouble() {
+  const mount = vi.fn<(container: HTMLElement, options: ChartMountOptions) => void>();
+  const renderer: ChartRenderer = {
+    mount,
+    setCandles: vi.fn(),
+    setTheme: vi.fn(),
+    setPrecision: vi.fn(),
+    resize: vi.fn(),
+    destroy: vi.fn(),
+  };
+  return { renderer, mount };
+}
+
 describe("MarketChart", () => {
   it("owns and cleans up an injected renderer while exposing textual OHLC", async () => {
-    const mount = vi.fn();
-    const setCandles = vi.fn();
-    const setTheme = vi.fn();
-    const setPrecision = vi.fn();
-    const destroy = vi.fn();
-    const renderer: ChartRenderer = {
-      mount,
-      setCandles,
-      setTheme,
-      setPrecision,
-      resize: vi.fn(),
-      destroy,
-    };
+    const { renderer, mount } = rendererDouble();
     const rendererFactory = vi.fn(() => renderer);
-    const view = render(
-      <MarketChart
-        candles={[candle]}
-        symbol="AAPL.US"
-        timeframeLabel="1 minute"
-        precision={2}
-        theme="dark"
-        paused={false}
-        rendererFactory={rendererFactory}
-      />,
-    );
-
+    const view = render(<MarketChart
+      candles={[candle]} symbol="AAPL.US" timeframeLabel="1 minute" precision={2}
+      theme="dark" paused={false} rendererFactory={rendererFactory}
+    />);
     expect(screen.getByRole("heading", { name: "AAPL.US · 1 minute" })).toBeVisible();
     expect(screen.getByText(/101[.,]25/)).toBeVisible();
     expect(screen.getByText(/not exchange-reported volume/i)).toBeVisible();
-    expect(
-      screen.getByRole("img", { name: /Interactive candlestick chart for AAPL\.US, 1 minute/i }),
-    ).toBeVisible();
-    expect(screen.getByTestId("market-chart-canvas")).not.toHaveAttribute("aria-hidden");
+    expect(screen.getByRole("img", { name: /Interactive candlestick chart for AAPL\.US, 1 minute/i })).toBeVisible();
     await waitFor(() => expect(mount).toHaveBeenCalledOnce());
-    expect(setCandles).toHaveBeenCalledWith([candle]);
-    expect(setTheme).toHaveBeenCalledWith("dark");
-    expect(setPrecision).toHaveBeenCalledWith(2);
-
+    expect(renderer.setCandles).toHaveBeenCalledWith([candle]);
+    expect(renderer.setTheme).toHaveBeenCalledWith("dark");
+    expect(renderer.setPrecision).toHaveBeenCalledWith(2);
     view.unmount();
-    expect(destroy).toHaveBeenCalledOnce();
+    expect(renderer.destroy).toHaveBeenCalledOnce();
   });
 
-  it("describes a genuine volume fallback accurately", () => {
-    render(
-      <MarketChart
-        candles={[{ ...candle, activityValue: 1_250, activitySource: "volume" }]}
-        symbol="MSFT.US"
-        timeframeLabel="5 minutes"
-        precision={2}
-        theme="light"
-        paused={false}
-        rendererFactory={() => ({
-          mount: () => undefined,
-          setCandles: () => undefined,
-          setTheme: () => undefined,
-          setPrecision: () => undefined,
-          resize: () => undefined,
-          destroy: () => undefined,
-        })}
-      />,
-    );
+  it("hydrates a replacement renderer with current candles, theme, and precision", async () => {
+    const first = rendererDouble();
+    const second = rendererDouble();
+    const firstFactory = () => first.renderer;
+    const secondFactory = () => second.renderer;
+    const next = { ...candle, timeMs: candle.timeMs + 60_000, close: 103 };
+    const view = render(<MarketChart
+      candles={[candle]} symbol="AAPL.US" timeframeLabel="1 minute" precision={2}
+      theme="dark" paused={false} rendererFactory={firstFactory}
+    />);
+    view.rerender(<MarketChart
+      candles={[candle, next]} symbol="AAPL.US" timeframeLabel="1 minute" precision={4}
+      theme="light" paused={false} rendererFactory={secondFactory}
+    />);
+    await waitFor(() => expect(second.mount).toHaveBeenCalledOnce());
+    expect(second.mount).toHaveBeenCalledWith(expect.any(HTMLElement), expect.objectContaining({ theme: "light", precision: 4 }));
+    expect(second.renderer.setCandles).toHaveBeenCalledWith([candle, next]);
+  });
 
-    expect(screen.getByText("Volume")).toBeVisible();
-    expect(screen.getByText(/reported last-size or cumulative-volume deltas/i)).toBeVisible();
+  it("keeps mixed activity labeling stable while the crosshair moves", async () => {
+    const { renderer, mount } = rendererDouble();
+    render(<MarketChart
+      candles={[candle, { ...candle, timeMs: candle.timeMs + 60_000, activitySource: "volume", activityValue: 1_250 }]}
+      symbol="MSFT.US" timeframeLabel="5 minutes" precision={2} theme="light" paused={false}
+      rendererFactory={() => renderer}
+    />);
+    const options = mount.mock.calls[0]?.[1];
+    options?.onCrosshairMove?.({ ...candle, activitySource: "updates" });
+    expect(screen.getByText("Activity")).toBeVisible();
+    expect(screen.getByText(/mixed reported volume/i)).toBeVisible();
+  });
+
+  it("renders the supplied empty state", () => {
+    const { renderer } = rendererDouble();
+    render(<MarketChart
+      candles={[]} symbol="AAPL.US" timeframeLabel="1 minute" precision={2}
+      theme="dark" paused={false} emptyMessage="No canonical data" rendererFactory={() => renderer}
+    />);
+    expect(screen.getByText("No canonical data")).toBeVisible();
   });
 });

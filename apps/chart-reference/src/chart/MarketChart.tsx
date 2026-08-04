@@ -1,21 +1,29 @@
 import { useEffect, useRef, useState } from "react";
 
 import { LightweightChartsRenderer } from "./LightweightChartsRenderer";
-import type {
-  ChartCandle,
-  ChartRenderer,
-  ChartRendererFactory,
-  ChartTheme,
-  CrosshairValue,
+import {
+  activityLabel as deriveActivityLabel,
+  type ChartCandle,
+  type ChartRenderer,
+  type ChartRendererFactory,
+  type ChartTheme,
+  type CrosshairValue,
 } from "./types";
 
 const defaultRendererFactory: ChartRendererFactory = () => new LightweightChartsRenderer();
+const formatterCache = new Map<number, Intl.NumberFormat>();
+const activityFormatter = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
 
 function formatNumber(value: number, precision: number): string {
-  return new Intl.NumberFormat(undefined, {
-    minimumFractionDigits: precision,
-    maximumFractionDigits: precision,
-  }).format(value);
+  let formatter = formatterCache.get(precision);
+  if (formatter == null) {
+    formatter = new Intl.NumberFormat(undefined, {
+      minimumFractionDigits: precision,
+      maximumFractionDigits: precision,
+    });
+    formatterCache.set(precision, formatter);
+  }
+  return formatter.format(value);
 }
 
 export interface MarketChartProps {
@@ -41,35 +49,36 @@ export function MarketChart({
 }: MarketChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const rendererRef = useRef<ChartRenderer | null>(null);
-  const initialMountOptionsRef = useRef({ theme, precision });
+  const candlesRef = useRef(candles);
+  const themeRef = useRef(theme);
+  const precisionRef = useRef(precision);
   const [crosshair, setCrosshair] = useState<CrosshairValue | null>(null);
+
+  candlesRef.current = candles;
+  themeRef.current = theme;
+  precisionRef.current = precision;
 
   useEffect(() => {
     const container = containerRef.current;
-    if (container == null) {
-      return undefined;
-    }
+    if (container == null) return undefined;
     const renderer = rendererFactory();
     rendererRef.current = renderer;
     renderer.mount(container, {
-      ...initialMountOptionsRef.current,
+      theme: themeRef.current,
+      precision: precisionRef.current,
       onCrosshairMove: setCrosshair,
     });
+    renderer.setCandles(candlesRef.current);
 
     const resizeObserver = new ResizeObserver(([entry]) => {
-      if (entry == null) {
-        return;
-      }
-      renderer.resize(entry.contentRect.width, entry.contentRect.height);
+      if (entry != null) renderer.resize(entry.contentRect.width, entry.contentRect.height);
     });
     resizeObserver.observe(container);
 
     return () => {
       resizeObserver.disconnect();
       renderer.destroy();
-      if (rendererRef.current === renderer) {
-        rendererRef.current = null;
-      }
+      if (rendererRef.current === renderer) rendererRef.current = null;
     };
   }, [rendererFactory]);
 
@@ -87,12 +96,7 @@ export function MarketChart({
 
   const latest = crosshair ?? candles.at(-1) ?? null;
   const label = crosshair == null ? "Latest bar" : "Crosshair bar";
-  const activityLabel =
-    latest?.activitySource === "volume"
-      ? "Volume"
-      : latest?.activitySource === "mixed"
-        ? "Activity"
-        : "Updates";
+  const activityLabel = deriveActivityLabel(candles);
 
   return (
     <section className="chart-panel" aria-labelledby="market-chart-title">
@@ -104,31 +108,14 @@ export function MarketChart({
           </h2>
         </div>
         {latest == null ? (
-          <p className="crosshair-readout" aria-live="polite">
-            {emptyMessage}
-          </p>
+          <p className="crosshair-readout" aria-live="polite">{emptyMessage}</p>
         ) : (
           <dl className="crosshair-readout" aria-label={label}>
-            <div>
-              <dt>O</dt>
-              <dd>{formatNumber(latest.open, precision)}</dd>
-            </div>
-            <div>
-              <dt>H</dt>
-              <dd>{formatNumber(latest.high, precision)}</dd>
-            </div>
-            <div>
-              <dt>L</dt>
-              <dd>{formatNumber(latest.low, precision)}</dd>
-            </div>
-            <div>
-              <dt>C</dt>
-              <dd>{formatNumber(latest.close, precision)}</dd>
-            </div>
-            <div>
-              <dt>{activityLabel}</dt>
-              <dd>{latest.activityValue}</dd>
-            </div>
+            <div><dt>O</dt><dd>{formatNumber(latest.open, precision)}</dd></div>
+            <div><dt>H</dt><dd>{formatNumber(latest.high, precision)}</dd></div>
+            <div><dt>L</dt><dd>{formatNumber(latest.low, precision)}</dd></div>
+            <div><dt>C</dt><dd>{formatNumber(latest.close, precision)}</dd></div>
+            <div><dt>{activityLabel}</dt><dd>{activityFormatter.format(latest.activityValue)}</dd></div>
           </dl>
         )}
       </div>

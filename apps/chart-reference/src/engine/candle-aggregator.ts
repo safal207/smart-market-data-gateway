@@ -37,10 +37,7 @@ export class CandleAggregator {
   private readonly cumulativeVolumeBySymbol = new Map<string, number>();
   private readonly maxCandlesPerSymbol: number;
 
-  constructor(
-    readonly timeframe: Timeframe,
-    options: CandleAggregatorOptions = {},
-  ) {
+  constructor(readonly timeframe: Timeframe, options: CandleAggregatorOptions = {}) {
     this.maxCandlesPerSymbol = positiveInteger(
       options.maxCandlesPerSymbol ?? 2_000,
       "maxCandlesPerSymbol",
@@ -49,28 +46,29 @@ export class CandleAggregator {
 
   ingest(point: MarketDataPoint): CandleAggregationUpdate {
     const { quote } = point;
+    const symbol = quote.symbol.trim().toUpperCase();
     const openTimeMs = bucketStart(quote.providerTimestampMs, this.timeframe);
-    let candles = this.candlesBySymbol.get(quote.symbol);
+    let candles = this.candlesBySymbol.get(symbol);
     if (candles == null) {
       candles = new Map();
-      this.candlesBySymbol.set(quote.symbol, candles);
+      this.candlesBySymbol.set(symbol, candles);
     }
 
-    const previousLatest = this.latestBucketBySymbol.get(quote.symbol);
+    const previousLatest = this.latestBucketBySymbol.get(symbol);
     const newlyCompleted: Candle[] = [];
     if (previousLatest == null || openTimeMs > previousLatest) {
       if (previousLatest != null) {
         const previous = candles.get(previousLatest);
         if (previous != null) newlyCompleted.push(this.materialize(previous, true));
       }
-      this.latestBucketBySymbol.set(quote.symbol, openTimeMs);
+      this.latestBucketBySymbol.set(symbol, openTimeMs);
     }
 
-    const volume = this.volumeContribution(point);
+    const volume = this.volumeContribution(point, symbol);
     let candle = candles.get(openTimeMs);
     if (candle == null) {
       candle = {
-        symbol: quote.symbol,
+        symbol,
         openTimeMs,
         open: quote.price,
         high: quote.price,
@@ -95,8 +93,8 @@ export class CandleAggregator {
       candle.revision += 1;
     }
 
-    this.trim(quote.symbol, candles);
-    const latest = this.latestBucketBySymbol.get(quote.symbol);
+    this.trim(candles);
+    const latest = this.latestBucketBySymbol.get(symbol);
     return Object.freeze({
       candle: this.materialize(candle, latest != null && openTimeMs < latest),
       newlyCompleted: Object.freeze(newlyCompleted),
@@ -111,12 +109,7 @@ export class CandleAggregator {
     return Object.freeze(
       [...candles.values()]
         .sort((left, right) => left.openTimeMs - right.openTimeMs)
-        .map((candle) =>
-          this.materialize(
-            candle,
-            latest != null && candle.openTimeMs < latest,
-          ),
-        ),
+        .map((candle) => this.materialize(candle, latest != null && candle.openTimeMs < latest)),
     );
   }
 
@@ -126,8 +119,7 @@ export class CandleAggregator {
 
   rebuild(points: readonly MarketDataPoint[]): void {
     this.reset();
-    const ordered = [...points].sort(comparePoints);
-    for (const point of ordered) this.ingest(point);
+    for (const point of [...points].sort(comparePoints)) this.ingest(point);
   }
 
   reset(): void {
@@ -136,26 +128,25 @@ export class CandleAggregator {
     this.cumulativeVolumeBySymbol.clear();
   }
 
-  private volumeContribution(point: MarketDataPoint): {
-    amount: number;
-    source: Exclude<CandleVolumeSource, "mixed">;
-  } {
+  private volumeContribution(
+    point: MarketDataPoint,
+    symbol: string,
+  ): { amount: number; source: Exclude<CandleVolumeSource, "mixed"> } {
     const { quote } = point;
     if (quote.lastSize != null) {
       if (quote.cumulativeVolume != null) {
-        this.cumulativeVolumeBySymbol.set(quote.symbol, quote.cumulativeVolume);
+        this.cumulativeVolumeBySymbol.set(symbol, quote.cumulativeVolume);
       }
       return { amount: quote.lastSize, source: "last-size" };
     }
     if (quote.cumulativeVolume != null) {
-      const previous = this.cumulativeVolumeBySymbol.get(quote.symbol);
-      this.cumulativeVolumeBySymbol.set(quote.symbol, quote.cumulativeVolume);
+      const previous = this.cumulativeVolumeBySymbol.get(symbol);
+      this.cumulativeVolumeBySymbol.set(symbol, quote.cumulativeVolume);
       if (previous == null) return { amount: 0, source: "cumulative-delta" };
       return {
-        amount:
-          quote.cumulativeVolume >= previous
-            ? quote.cumulativeVolume - previous
-            : quote.cumulativeVolume,
+        amount: quote.cumulativeVolume >= previous
+          ? quote.cumulativeVolume - previous
+          : quote.cumulativeVolume,
         source: "cumulative-delta",
       };
     }
@@ -164,10 +155,9 @@ export class CandleAggregator {
 
   private materialize(candle: MutableCandle, complete: boolean): Candle {
     const durationMs = TIMEFRAME_DURATION_MS[this.timeframe];
-    const volumeSource: CandleVolumeSource =
-      candle.volumeSources.size === 1
-        ? [...candle.volumeSources][0]!
-        : "mixed";
+    const volumeSource: CandleVolumeSource = candle.volumeSources.size === 1
+      ? [...candle.volumeSources][0]!
+      : "mixed";
     return Object.freeze({
       symbol: candle.symbol,
       timeframe: this.timeframe,
@@ -187,14 +177,13 @@ export class CandleAggregator {
     });
   }
 
-  private trim(symbol: string, candles: Map<number, MutableCandle>): void {
-    while (candles.size > this.maxCandlesPerSymbol) {
-      const oldest = Math.min(...candles.keys());
-      candles.delete(oldest);
-    }
-    if (candles.size === 0) {
-      this.candlesBySymbol.delete(symbol);
-      this.latestBucketBySymbol.delete(symbol);
+  private trim(candles: Map<number, MutableCandle>): void {
+    const excess = candles.size - this.maxCandlesPerSymbol;
+    if (excess <= 0) return;
+    const orderedKeys = [...candles.keys()].sort((left, right) => left - right);
+    for (let index = 0; index < excess; index += 1) {
+      const key = orderedKeys[index];
+      if (key != null) candles.delete(key);
     }
   }
 }

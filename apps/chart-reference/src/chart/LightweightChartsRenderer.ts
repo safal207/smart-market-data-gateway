@@ -11,11 +11,12 @@ import {
   type UTCTimestamp,
 } from "lightweight-charts";
 
-import type {
-  ChartCandle,
-  ChartMountOptions,
-  ChartRenderer,
-  ChartTheme,
+import {
+  activityLabel,
+  type ChartCandle,
+  type ChartMountOptions,
+  type ChartRenderer,
+  type ChartTheme,
 } from "./types";
 
 const UP_COLOR = "#22c58b";
@@ -75,9 +76,9 @@ function sameCandle(left: ChartCandle, right: ChartCandle): boolean {
     left.high === right.high &&
     left.low === right.low &&
     left.close === right.close &&
-    left.updateCount === right.updateCount
-    && left.activityValue === right.activityValue
-    && left.activitySource === right.activitySource
+    left.updateCount === right.updateCount &&
+    left.activityValue === right.activityValue &&
+    left.activitySource === right.activitySource
   );
 }
 
@@ -85,16 +86,10 @@ function canIncrementallyUpdate(
   previous: readonly ChartCandle[],
   next: readonly ChartCandle[],
 ): boolean {
-  if (next.length === 0 || previous.length === 0) {
-    return false;
-  }
-  if (next.length !== previous.length && next.length !== previous.length + 1) {
-    return false;
-  }
+  if (next.length === 0 || previous.length === 0) return false;
+  if (next.length !== previous.length && next.length !== previous.length + 1) return false;
   const stableLength = next.length - 1;
-  if (stableLength > previous.length) {
-    return false;
-  }
+  if (stableLength > previous.length) return false;
   for (let index = 0; index < stableLength; index += 1) {
     const previousCandle = previous[index];
     const nextCandle = next[index];
@@ -110,6 +105,7 @@ export class LightweightChartsRenderer implements ChartRenderer {
   private candles: ISeriesApi<"Candlestick"> | null = null;
   private updates: ISeriesApi<"Histogram"> | null = null;
   private previous: readonly ChartCandle[] = [];
+  private activityTitle: "Volume" | "Updates" | "Activity" = "Activity";
   private metadataByTime = new Map<
     number,
     Pick<ChartCandle, "updateCount" | "activityValue" | "activitySource">
@@ -122,7 +118,6 @@ export class LightweightChartsRenderer implements ChartRenderer {
       layout: {
         background: { type: ColorType.Solid, color: palette.background },
         textColor: palette.text,
-        // The visible footer supplies the licence-required TradingView link.
         attributionLogo: false,
         panes: {
           separatorColor: palette.border,
@@ -166,7 +161,7 @@ export class LightweightChartsRenderer implements ChartRenderer {
     const updates = chart.addSeries(
       HistogramSeries,
       {
-        title: "Updates",
+        title: this.activityTitle,
         priceFormat: { type: "volume" },
         priceLineVisible: false,
         lastValueVisible: false,
@@ -174,9 +169,7 @@ export class LightweightChartsRenderer implements ChartRenderer {
       1,
     );
 
-    updates.priceScale().applyOptions({
-      scaleMargins: { top: 0.2, bottom: 0 },
-    });
+    updates.priceScale().applyOptions({ scaleMargins: { top: 0.2, bottom: 0 } });
 
     if (options.onCrosshairMove != null) {
       chart.subscribeCrosshairMove((parameter) => {
@@ -210,48 +203,46 @@ export class LightweightChartsRenderer implements ChartRenderer {
   }
 
   setCandles(candles: readonly ChartCandle[]): void {
-    if (this.chart == null || this.candles == null || this.updates == null) {
-      return;
-    }
-    this.metadataByTime = new Map(
-      candles.map((candle) => [
-        Math.floor(candle.timeMs / 1_000) * 1_000,
-        {
-          updateCount: candle.updateCount,
-          activityValue: candle.activityValue,
-          activitySource: candle.activitySource,
-        },
-      ]),
-    );
-    const sources = new Set(candles.map((candle) => candle.activitySource));
-    const activityTitle =
-      sources.size === 1 && sources.has("volume")
-        ? "Volume"
-        : sources.size === 1 && sources.has("updates")
-          ? "Updates"
-          : "Activity";
-    this.updates.applyOptions({ title: activityTitle });
+    if (this.chart == null || this.candles == null || this.updates == null) return;
 
-    if (canIncrementallyUpdate(this.previous, candles)) {
+    const incremental = canIncrementallyUpdate(this.previous, candles);
+    if (incremental) {
       const last = candles.at(-1);
       if (last != null) {
+        this.metadataByTime.set(Math.floor(last.timeMs / 1_000) * 1_000, {
+          updateCount: last.updateCount,
+          activityValue: last.activityValue,
+          activitySource: last.activitySource,
+        });
         this.candles.update(candleData(last));
         this.updates.update(updateData(last));
       }
     } else {
+      this.metadataByTime = new Map(
+        candles.map((candle) => [
+          Math.floor(candle.timeMs / 1_000) * 1_000,
+          {
+            updateCount: candle.updateCount,
+            activityValue: candle.activityValue,
+            activitySource: candle.activitySource,
+          },
+        ]),
+      );
       this.candles.setData(candles.map(candleData));
       this.updates.setData(candles.map(updateData));
-      if (this.previous.length === 0 && candles.length > 0) {
-        this.chart.timeScale().fitContent();
-      }
+      if (this.previous.length === 0 && candles.length > 0) this.chart.timeScale().fitContent();
     }
-    this.previous = candles.map((candle) => ({ ...candle }));
+
+    const nextTitle = activityLabel(candles);
+    if (nextTitle !== this.activityTitle) {
+      this.activityTitle = nextTitle;
+      this.updates.applyOptions({ title: nextTitle });
+    }
+    this.previous = candles;
   }
 
   setTheme(theme: ChartTheme): void {
-    if (this.chart == null) {
-      return;
-    }
+    if (this.chart == null) return;
     const palette = PALETTES[theme];
     this.chart.applyOptions({
       layout: {
@@ -266,6 +257,10 @@ export class LightweightChartsRenderer implements ChartRenderer {
         vertLines: { color: palette.grid },
         horzLines: { color: palette.grid },
       },
+      crosshair: {
+        vertLine: { color: palette.crosshair, labelBackgroundColor: palette.border },
+        horzLine: { color: palette.crosshair, labelBackgroundColor: palette.border },
+      },
       rightPriceScale: { borderColor: palette.border },
       timeScale: { borderColor: palette.border },
     });
@@ -276,9 +271,7 @@ export class LightweightChartsRenderer implements ChartRenderer {
   }
 
   resize(width: number, height: number): void {
-    if (this.chart == null || width < 1 || height < 1) {
-      return;
-    }
+    if (this.chart == null || width < 1 || height < 1) return;
     this.chart.resize(Math.floor(width), Math.floor(height));
   }
 
@@ -288,6 +281,7 @@ export class LightweightChartsRenderer implements ChartRenderer {
     this.candles = null;
     this.updates = null;
     this.previous = [];
+    this.activityTitle = "Activity";
     this.metadataByTime.clear();
   }
 

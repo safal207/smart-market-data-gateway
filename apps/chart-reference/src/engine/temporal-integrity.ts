@@ -1,16 +1,8 @@
 import type { MarketDataPoint } from "../market-data";
 
 export type IntegrityAcceptedReason =
-  | "initial"
-  | "advanced"
-  | "same_timestamp"
-  | "generation_advanced"
-  | "sequence_gap";
-
-export type QuarantineReason =
-  | "stale_generation"
-  | "timestamp_rollback"
-  | "sequence_regression";
+  | "initial" | "advanced" | "same_timestamp" | "generation_advanced" | "sequence_gap";
+export type QuarantineReason = "stale_generation" | "timestamp_rollback" | "sequence_regression";
 
 export interface AcceptedDecision {
   readonly outcome: "accepted";
@@ -18,13 +10,11 @@ export interface AcceptedDecision {
   readonly point: MarketDataPoint;
   readonly sequenceGap?: number;
 }
-
 export interface DuplicateDecision {
   readonly outcome: "duplicate";
   readonly reason: "duplicate_event";
   readonly point: MarketDataPoint;
 }
-
 export interface QuarantinedMarketData {
   readonly reason: QuarantineReason;
   readonly point: MarketDataPoint;
@@ -33,25 +23,18 @@ export interface QuarantinedMarketData {
   readonly previousSequence?: number;
   readonly quarantinedAtMs: number;
 }
-
 export interface QuarantinedDecision {
   readonly outcome: "quarantined";
   readonly reason: QuarantineReason;
   readonly point: MarketDataPoint;
   readonly quarantine: QuarantinedMarketData;
 }
-
-export type IntegrityDecision =
-  | AcceptedDecision
-  | DuplicateDecision
-  | QuarantinedDecision;
-
+export type IntegrityDecision = AcceptedDecision | DuplicateDecision | QuarantinedDecision;
 export interface TemporalIntegrityGuardOptions {
   readonly seenEventRetention?: number;
   readonly quarantineRetention?: number;
   readonly allowSequenceResetOnGeneration?: boolean;
 }
-
 interface StreamWatermark {
   generation: number;
   providerTimestampMs?: number;
@@ -70,16 +53,9 @@ export class TemporalIntegrityGuard {
   private readonly allowSequenceResetOnGeneration: boolean;
 
   constructor(options: TemporalIntegrityGuardOptions = {}) {
-    this.seenEventRetention = positiveInteger(
-      options.seenEventRetention ?? 10_000,
-      "seenEventRetention",
-    );
-    this.quarantineRetention = positiveInteger(
-      options.quarantineRetention ?? 500,
-      "quarantineRetention",
-    );
-    this.allowSequenceResetOnGeneration =
-      options.allowSequenceResetOnGeneration ?? true;
+    this.seenEventRetention = positiveInteger(options.seenEventRetention ?? 10_000, "seenEventRetention");
+    this.quarantineRetention = positiveInteger(options.quarantineRetention ?? 500, "quarantineRetention");
+    this.allowSequenceResetOnGeneration = options.allowSequenceResetOnGeneration ?? true;
   }
 
   evaluate(point: MarketDataPoint): IntegrityDecision {
@@ -90,64 +66,51 @@ export class TemporalIntegrityGuard {
     }
 
     const generationAdvanced = point.generation > watermark.generation;
-    if (generationAdvanced) {
-      watermark.generation = point.generation;
-      watermark.pendingSequenceResetGeneration = point.generation;
-    }
     const canResetSequence =
-      watermark.pendingSequenceResetGeneration === point.generation &&
-      this.allowSequenceResetOnGeneration;
-    this.watermarks.set(key, watermark);
+      (generationAdvanced || watermark.pendingSequenceResetGeneration === point.generation)
+      && this.allowSequenceResetOnGeneration;
 
     if (this.seenEventIds.has(point.quote.eventId)) {
-      return Object.freeze({
-        outcome: "duplicate",
-        reason: "duplicate_event",
-        point,
-      });
+      return Object.freeze({ outcome: "duplicate", reason: "duplicate_event", point });
     }
-
     if (
-      watermark.providerTimestampMs != null &&
-      point.quote.providerTimestampMs < watermark.providerTimestampMs
+      watermark.providerTimestampMs != null
+      && point.quote.providerTimestampMs < watermark.providerTimestampMs
     ) {
       return this.quarantine("timestamp_rollback", point, watermark);
     }
-
     if (
-      !canResetSequence &&
-      watermark.sequence != null &&
-      point.quote.sequence != null &&
-      point.quote.sequence <= watermark.sequence
+      !canResetSequence
+      && watermark.sequence != null
+      && point.quote.sequence != null
+      && point.quote.sequence <= watermark.sequence
     ) {
       return this.quarantine("sequence_regression", point, watermark);
     }
 
     let reason: IntegrityAcceptedReason;
     let sequenceGap: number | undefined;
-    if (watermark.providerTimestampMs == null) {
-      reason = "initial";
-    } else if (generationAdvanced || canResetSequence) {
-      reason = "generation_advanced";
-    } else if (
-      watermark.sequence != null &&
-      point.quote.sequence != null &&
-      point.quote.sequence > watermark.sequence + 1
+    if (watermark.providerTimestampMs == null) reason = "initial";
+    else if (generationAdvanced || canResetSequence) reason = "generation_advanced";
+    else if (
+      watermark.sequence != null
+      && point.quote.sequence != null
+      && point.quote.sequence > watermark.sequence + 1
     ) {
       reason = "sequence_gap";
       sequenceGap = point.quote.sequence - watermark.sequence - 1;
     } else if (point.quote.providerTimestampMs === watermark.providerTimestampMs) {
       reason = "same_timestamp";
-    } else {
-      reason = "advanced";
-    }
+    } else reason = "advanced";
 
+    watermark.generation = point.generation;
     watermark.providerTimestampMs = Math.max(
       watermark.providerTimestampMs ?? Number.NEGATIVE_INFINITY,
       point.quote.providerTimestampMs,
     );
     if (point.quote.sequence != null) watermark.sequence = point.quote.sequence;
     watermark.pendingSequenceResetGeneration = undefined;
+    this.watermarks.set(key, watermark);
     this.rememberEvent(point.quote.eventId);
     return Object.freeze({
       outcome: "accepted",
@@ -177,18 +140,13 @@ export class TemporalIntegrityGuard {
       reason,
       point,
       expectedGeneration: watermark.generation,
-      ...(watermark.providerTimestampMs == null
-        ? {}
-        : { previousProviderTimestampMs: watermark.providerTimestampMs }),
+      ...(watermark.providerTimestampMs == null ? {} : { previousProviderTimestampMs: watermark.providerTimestampMs }),
       ...(watermark.sequence == null ? {} : { previousSequence: watermark.sequence }),
       quarantinedAtMs: point.quote.receivedAtMs,
     });
     this.quarantineEntries.push(entry);
     if (this.quarantineEntries.length > this.quarantineRetention) {
-      this.quarantineEntries.splice(
-        0,
-        this.quarantineEntries.length - this.quarantineRetention,
-      );
+      this.quarantineEntries.splice(0, this.quarantineEntries.length - this.quarantineRetention);
     }
     return Object.freeze({ outcome: "quarantined", reason, point, quarantine: entry });
   }
@@ -206,10 +164,7 @@ export class TemporalIntegrityGuard {
 function streamKey(point: MarketDataPoint): string {
   return `${point.quote.provider}:${point.quote.symbol}`;
 }
-
 function positiveInteger(value: number, name: string): number {
-  if (!Number.isInteger(value) || value <= 0) {
-    throw new RangeError(`${name} must be a positive integer`);
-  }
+  if (!Number.isInteger(value) || value <= 0) throw new RangeError(`${name} must be a positive integer`);
   return value;
 }

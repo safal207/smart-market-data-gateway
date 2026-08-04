@@ -10,11 +10,11 @@ export interface PricePrecisionOptions {
   readonly maximumPrecision?: number;
 }
 
-export function derivePricePrecision(
-  options: PricePrecisionOptions = {},
-): PricePrecision {
+export function derivePricePrecision(options: PricePrecisionOptions = {}): PricePrecision {
   const maximum = boundedInteger(options.maximumPrecision ?? 8, 0, 12);
-  const fallback = boundedInteger(options.fallbackPrecision ?? 2, 0, maximum);
+  const fallback = options.fallbackPrecision == null
+    ? Math.min(2, maximum)
+    : boundedInteger(options.fallbackPrecision, 0, maximum);
   if (options.tickSize != null) {
     if (!Number.isFinite(options.tickSize) || options.tickSize <= 0) {
       throw new RangeError("tickSize must be a positive finite number");
@@ -24,24 +24,20 @@ export function derivePricePrecision(
       minMove: options.tickSize,
     });
   }
-
   const observed = (options.observedPrices ?? []).filter(
     (price) => Number.isFinite(price) && price > 0,
   );
-  const precision =
-    observed.length === 0
-      ? fallback
-      : Math.min(maximum, Math.max(fallback, ...observed.map(decimalPlaces)));
+  const precision = observed.length === 0
+    ? fallback
+    : Math.min(maximum, Math.max(fallback, ...observed.map(decimalPlaces)));
   return Object.freeze({ precision, minMove: 10 ** -precision });
 }
 
 export function formatPrice(value: number, precision: PricePrecision | number): string {
   if (!Number.isFinite(value)) return "—";
-  const digits =
-    typeof precision === "number" ? precision : precision.precision;
+  const digits = typeof precision === "number" ? precision : precision.precision;
   const bounded = boundedInteger(digits, 0, 12);
-  const normalized = Object.is(value, -0) ? 0 : value;
-  return normalized.toFixed(bounded);
+  return (Object.is(value, -0) ? 0 : value).toFixed(bounded);
 }
 
 export function decimalPlaces(value: number): number {

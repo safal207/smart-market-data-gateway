@@ -1,12 +1,17 @@
 import type { MarketDataPoint } from "../market-data";
 
 export const DEFAULT_STALE_AFTER_MS = 5_000;
+const observedAtByPoint = new WeakMap<MarketDataPoint, number>();
 
 export function marketDataAgeMs(point: MarketDataPoint, nowMs: number): number {
-  if (!Number.isFinite(nowMs)) {
-    throw new RangeError("nowMs must be finite");
+  if (!Number.isFinite(nowMs)) throw new RangeError("nowMs must be finite");
+  let observedAtMs = observedAtByPoint.get(point);
+  if (observedAtMs == null) {
+    observedAtMs = nowMs;
+    observedAtByPoint.set(point, observedAtMs);
   }
-  return Math.max(0, point.ageMs, nowMs - point.quote.receivedAtMs);
+  const localElapsedMs = Math.max(0, nowMs - observedAtMs);
+  return Math.max(0, point.ageMs + localElapsedMs);
 }
 
 export function isMarketDataPointStale(
