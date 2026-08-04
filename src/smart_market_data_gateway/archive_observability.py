@@ -9,7 +9,7 @@ from typing import Any
 
 from prometheus_client import CollectorRegistry, Counter, Gauge
 from redis.asyncio import Redis
-from redis.exceptions import RedisError, ResponseError
+from redis.exceptions import ResponseError
 
 from smart_market_data_gateway.config import Settings
 
@@ -233,7 +233,9 @@ class CandleArchiveMonitor:
     async def sample(self) -> CandleArchiveConsumerHealth | None:
         try:
             snapshot = await collect_candle_archive_consumer_health(self.redis, self.config)
-        except (RedisError, TypeError, ValueError):
+        except Exception:
+            # Monitoring must fail closed for unexpected Redis response shapes too.
+            # asyncio.CancelledError inherits BaseException and still propagates.
             self.metrics.monitor_up.set(0)
             self.metrics.monitor_errors.inc()
             logger.warning(
