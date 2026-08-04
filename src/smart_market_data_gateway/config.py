@@ -84,6 +84,8 @@ class Settings(BaseSettings):
     dedupe_ttl_seconds: int = 3600
 
     quote_freshness_seconds: float = 5.0
+    candle_history_retention_seconds: int = 30 * 24 * 60 * 60
+    candle_update_retry_limit: int = 8
     subscription_grace_seconds: float = 3.0
     subscription_ttl_seconds: int = 60
     heartbeat_seconds: float = 15.0
