@@ -6,6 +6,7 @@ export type WorkspaceConnectionState =
   | "connecting"
   | "live"
   | "stale"
+  | "no_data"
   | "reconnecting"
   | "replay"
   | "paused"
