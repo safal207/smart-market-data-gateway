@@ -76,13 +76,27 @@ def rich_event(**overrides: object) -> QuoteEvent:
     return QuoteEvent.model_validate(event)
 
 
-def test_quote_event_v1_remains_level1_compatible() -> None:
+def test_quote_event_v1_remains_level1_compatible_and_sparse() -> None:
     event = QuoteEvent.model_validate(base_event())
 
     assert event.schema_version == "1.0"
     assert event.capabilities == frozenset({MarketEvidenceCapability.LEVEL1_QUOTE})
     assert event.volume is None
     assert event.bid_depth is None
+
+    serialized = event.model_dump(mode="json")
+    assert serialized["capabilities"] == ["level1_quote"]
+    for unavailable_field in (
+        "volume",
+        "buy_volume",
+        "sell_volume",
+        "trade_count",
+        "bid_depth",
+        "ask_depth",
+        "volume_semantics",
+        "depth_semantics",
+    ):
+        assert unavailable_field not in serialized
 
 
 def test_rich_v11_event_preserves_units_capabilities_and_observed_zero() -> None:
@@ -94,6 +108,18 @@ def test_rich_v11_event_preserves_units_capabilities_and_observed_zero() -> None
     assert MarketEvidenceCapability.AGGRESSOR_FLOW in event.capabilities
     assert event.depth_semantics is not None
     assert event.depth_semantics.levels == 1
+
+    serialized = event.model_dump(mode="json")
+    assert serialized["volume"] == "0"
+    assert serialized["capabilities"] == sorted(
+        [
+            "level1_quote",
+            "volume",
+            "aggressor_flow",
+            "trade_count",
+            "top_of_book_depth",
+        ]
+    )
 
 
 def test_rich_fields_require_schema_v11() -> None:
