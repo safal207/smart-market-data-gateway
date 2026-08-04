@@ -1,9 +1,17 @@
+import { useEffect, useState } from "react";
+
 import { MarketChart } from "../../chart";
 import { ConnectionStatus } from "./ConnectionStatus";
 import { InstrumentControl } from "./InstrumentControl";
 import { MarketDataSummary } from "./MarketDataSummary";
 import { QuoteStrip } from "./QuoteStrip";
-import type { ChartWorkspaceActions, ChartWorkspaceModel } from "./types";
+import type {
+  ChartWorkspaceActions,
+  ChartWorkspaceModel,
+  WorkspaceConnectionState,
+} from "./types";
+
+const FIRST_MARKET_DATA_TIMEOUT_MS = 5_000;
 
 export interface ChartWorkspaceProps {
   readonly model: ChartWorkspaceModel;
@@ -11,6 +19,38 @@ export interface ChartWorkspaceProps {
 }
 
 export function ChartWorkspace({ model, actions }: ChartWorkspaceProps) {
+  const waitingForGatewayData =
+    model.sourceMode === "gateway" &&
+    model.connectionState === "live" &&
+    model.quote == null;
+  const [firstDataTimedOut, setFirstDataTimedOut] = useState(false);
+
+  useEffect(() => {
+    setFirstDataTimedOut(false);
+    if (!waitingForGatewayData) return undefined;
+    const timer = window.setTimeout(() => {
+      setFirstDataTimedOut(true);
+    }, FIRST_MARKET_DATA_TIMEOUT_MS);
+    return () => window.clearTimeout(timer);
+  }, [model.symbol, model.timeframe, waitingForGatewayData]);
+
+  const effectiveConnectionState: WorkspaceConnectionState = waitingForGatewayData
+    ? firstDataTimedOut
+      ? "no_data"
+      : "connecting"
+    : model.connectionState;
+  const effectiveConnectionDetail = waitingForGatewayData
+    ? firstDataTimedOut
+      ? "The gateway is connected, but no market data arrived for this instrument. Check the symbol, permissions, provider session, or reconnect."
+      : "Connected to the gateway. Waiting for the first market-data update before marking the stream Live."
+    : model.connectionDetail;
+  const emptyMessage =
+    model.sourceMode === "replay"
+      ? "Waiting for replay data…"
+      : firstDataTimedOut
+        ? "No market data is available for this instrument and timeframe."
+        : "Waiting for market data…";
+
   return (
     <div className="app-shell" data-theme={model.theme}>
       <a className="skip-link" href="#chart-workspace-main">
@@ -55,11 +95,12 @@ export function ChartWorkspace({ model, actions }: ChartWorkspaceProps) {
           precision={model.precision}
           theme={model.theme}
           paused={model.paused}
+          emptyMessage={emptyMessage}
         />
         <aside className="workspace-sidebar" aria-label="Market-data details">
           <ConnectionStatus
-            state={model.connectionState}
-            detail={model.connectionDetail}
+            state={effectiveConnectionState}
+            detail={effectiveConnectionDetail}
             reconnectAttempt={model.reconnectAttempt}
             lastUpdateMs={model.lastUpdateMs}
             onReconnect={actions.reconnect}
