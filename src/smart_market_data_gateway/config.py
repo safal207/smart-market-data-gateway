@@ -57,6 +57,7 @@ class Settings(BaseSettings):
     environment: str = "development"
     log_level: str = "INFO"
     collector_metrics_port: int = 9101
+    candle_archive_metrics_port: int = Field(default=9102, ge=1, le=65_535)
 
     redis_url: str = Field(default="redis://localhost:6379/0")
     database_url: str | None = Field(default=None)
