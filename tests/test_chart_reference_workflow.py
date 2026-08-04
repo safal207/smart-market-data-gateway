@@ -10,6 +10,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_PATH = REPOSITORY_ROOT / ".github" / "workflows" / "chart-reference.yml"
 CHART_ROOT = REPOSITORY_ROOT / "apps" / "chart-reference"
 PINNED_ACTION = re.compile(r"^[^@\s]+@[0-9a-f]{40}$")
+EXACT_TRIGGER_SHA = "${{ github.event.pull_request.head.sha || github.sha }}"
 
 
 def _load_workflow() -> dict[str, Any]:
@@ -34,7 +35,9 @@ def test_chart_reference_workflow_is_pinned_and_least_privilege() -> None:
     assert not unpinned, f"actions are not pinned to a full commit SHA: {unpinned}"
     checkouts = [step for step in action_steps if step["uses"].startswith("actions/checkout@")]
     assert len(checkouts) == 1, f"expected exactly one checkout step, found {len(checkouts)}"
-    assert checkouts[0]["with"]["persist-credentials"] is False
+    checkout = checkouts[0]
+    assert checkout["with"]["persist-credentials"] is False
+    assert checkout["with"]["ref"] == EXACT_TRIGGER_SHA
     commands = "\n".join(str(step.get("run", "")) for step in steps)
     for required in (
         "pnpm install --frozen-lockfile", "pnpm audit --audit-level high", "pnpm lint",
