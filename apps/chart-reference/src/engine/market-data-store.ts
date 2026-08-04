@@ -118,13 +118,25 @@ export class MarketDataStore {
         symbol,
         (this.duplicateCountsBySymbol.get(symbol) ?? 0) + 1,
       );
-      const latest = this.latestBySymbol.get(symbol);
+      let latest = this.latestBySymbol.get(symbol);
+      if (latest == null) {
+        const retained = this.eventsBySymbol.get(symbol);
+        if (retained != null) {
+          for (let index = retained.length - 1; index >= 0; index -= 1) {
+            const candidate = retained[index];
+            if (candidate?.quote.eventId === point.quote.eventId) {
+              latest = candidate;
+              break;
+            }
+          }
+        }
+      }
       if (
         latest != null &&
         latest.quote.eventId === point.quote.eventId &&
         point.generation >= latest.generation
       ) {
-        // A duplicate must never change OHLC, but its current transport freshness is useful.
+        // A duplicate never changes OHLC, but current-generation transport freshness is useful.
         this.latestBySymbol.set(
           symbol,
           Object.freeze({ ...point, quote: latest.quote }),
@@ -155,7 +167,13 @@ export class MarketDataStore {
 
   setConnectionStatus(status: SourceStatus): void {
     if (sameStatus(this.connectionStatus, status)) return;
+    const generationChanged = status.generation !== this.connectionStatus.generation;
     this.connectionStatus = Object.freeze({ ...status });
+    if (generationChanged) {
+      // Historical candles remain visible, but a fresh transport generation must earn Live
+      // with its own accepted or duplicate snapshot instead of inheriting a prior quote.
+      this.latestBySymbol.clear();
+    }
     this.publish();
   }
 

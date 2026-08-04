@@ -48,6 +48,42 @@ describe("MarketDataStore", () => {
     });
   });
 
+  it("requires current-generation data after reconnect while retaining history", () => {
+    const store = new MarketDataStore({ timeframe: "5s" });
+    store.setConnectionStatus({ state: "connecting", generation: 1, reconnectAttempt: 0 });
+    const first = makePoint(1, {
+      generation: 1,
+      quote: { providerTimestampMs: 1_000 },
+    });
+    expect(store.ingest(first).outcome).toBe("accepted");
+    expect(store.getSnapshot().latestPoints["AAPL.US"]?.generation).toBe(1);
+    expect(store.getSnapshot().candles["AAPL.US"]).toHaveLength(1);
+
+    store.setConnectionStatus({ state: "reconnecting", generation: 2, reconnectAttempt: 0 });
+    expect(store.getSnapshot().latestPoints["AAPL.US"]).toBeUndefined();
+    expect(store.getSnapshot().candles["AAPL.US"]).toHaveLength(1);
+    expect(store.getSnapshot().acceptedLog).toHaveLength(1);
+
+    store.setConnectionStatus({ state: "live", generation: 2, reconnectAttempt: 0 });
+    expect(store.getSnapshot().latestPoints["AAPL.US"]).toBeUndefined();
+
+    const repeatedSnapshot = makePoint(1, {
+      generation: 2,
+      origin: "snapshot",
+      stale: true,
+      ageMs: 2_000,
+      quote: { providerTimestampMs: 1_000, price: 999 },
+    });
+    expect(store.ingest(repeatedSnapshot).outcome).toBe("duplicate");
+    expect(store.getSnapshot().latestQuotes["AAPL.US"]?.price).toBe(first.quote.price);
+    expect(store.getSnapshot().latestPoints["AAPL.US"]).toMatchObject({
+      generation: 2,
+      origin: "snapshot",
+      stale: true,
+      ageMs: 2_000,
+    });
+  });
+
   it("keeps the latest quote monotonic and records quarantined regressions", () => {
     const store = new MarketDataStore({ logRetention: 2 });
     store.ingest(makePoint(10));

@@ -1,4 +1,4 @@
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
@@ -67,6 +67,8 @@ describe("App", () => {
     expect(stored).toContain('"selectedSymbol":"AAPL.US"');
     expect(stored).not.toContain("dev-basic:chart-reference");
     expect(stored).not.toContain("token");
+    expect(stored).not.toContain("showVolume");
+    expect(stored).not.toContain("autoReconnect");
     view.unmount();
   });
 
@@ -102,5 +104,46 @@ describe("App", () => {
       vi.advanceTimersByTime(6_000);
     });
     expect(screen.getByRole("status")).toHaveTextContent("Stale");
+  });
+
+  it("requires a quote from the new generation after reconnect", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-02T12:00:00.000Z"));
+    vi.stubGlobal("WebSocket", AppTestSocket);
+    window.history.replaceState(null, "", "/?source=gateway");
+    render(<App />);
+    await act(async () => Promise.resolve());
+    const firstSocket = AppTestSocket.instances[0];
+    expect(firstSocket).toBeDefined();
+
+    act(() => firstSocket?.open());
+    const timestamp = new Date(Date.now()).toISOString();
+    act(() => {
+      firstSocket?.message({
+        type: "quote",
+        timestamp,
+        request_id: null,
+        data: {
+          quote: {
+            ...wireQuote(),
+            provider_timestamp: timestamp,
+            received_at: timestamp,
+          },
+        },
+      });
+    });
+    expect(screen.getByRole("status")).toHaveTextContent("Live");
+
+    fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
+    const secondSocket = AppTestSocket.instances[1];
+    expect(secondSocket).toBeDefined();
+    act(() => secondSocket?.open());
+
+    expect(screen.getByRole("status")).toHaveTextContent("Connecting");
+    expect(screen.getByRole("status")).not.toHaveTextContent("Live");
+    act(() => {
+      vi.advanceTimersByTime(5_000);
+    });
+    expect(screen.getByRole("status")).toHaveTextContent("No data");
   });
 });

@@ -4,7 +4,7 @@ import { TIMEFRAMES, type Timeframe } from "./types";
 export const WORKSPACE_STORAGE_KEY = "smdg.chart-reference.workspace";
 export const WORKSPACE_VERSION = 1 as const;
 
-const workspaceSchema = z
+const persistedWorkspaceSchema = z
   .object({
     version: z.literal(WORKSPACE_VERSION),
     selectedSymbol: z
@@ -12,6 +12,15 @@ const workspaceSchema = z
       .trim()
       .transform((value) => value.toUpperCase())
       .pipe(z.string().min(1).max(32).regex(/^[A-Z0-9._:-]+$/)),
+    timeframe: z.enum(TIMEFRAMES),
+    theme: z.enum(["dark", "light", "system"]),
+  })
+  .strict();
+
+const expandedV1WorkspaceSchema = z
+  .object({
+    version: z.literal(WORKSPACE_VERSION),
+    selectedSymbol: z.string(),
     timeframe: z.enum(TIMEFRAMES),
     theme: z.enum(["dark", "light", "system"]),
     showVolume: z.boolean(),
@@ -65,8 +74,19 @@ export function loadWorkspace(
     const serialized = storage.getItem(key);
     if (serialized == null) return Object.freeze({ ...fallback });
     const raw: unknown = JSON.parse(serialized);
-    const current = workspaceSchema.safeParse(raw);
-    if (current.success) return Object.freeze(current.data);
+    const current = persistedWorkspaceSchema.safeParse(raw);
+    if (current.success) return hydrateWorkspace(current.data, fallback);
+    const expandedV1 = expandedV1WorkspaceSchema.safeParse(raw);
+    if (expandedV1.success) {
+      return Object.freeze({
+        version: WORKSPACE_VERSION,
+        selectedSymbol: expandedV1.data.selectedSymbol.trim().toUpperCase(),
+        timeframe: expandedV1.data.timeframe,
+        theme: expandedV1.data.theme,
+        showVolume: expandedV1.data.showVolume,
+        autoReconnect: expandedV1.data.autoReconnect,
+      });
+    }
     const migrated = migrateLegacyWorkspace(raw, fallback);
     return migrated ?? Object.freeze({ ...fallback });
   } catch {
@@ -74,7 +94,7 @@ export function loadWorkspace(
   }
 }
 
-/** Persists preferences only. Tokens, quote history, and bars are never serialized. */
+/** Persists the exact public allowlist: symbol, timeframe, and theme only. */
 export function saveWorkspace(
   storage: WorkspaceStorage | undefined,
   input: WorkspaceState,
@@ -82,13 +102,11 @@ export function saveWorkspace(
 ): boolean {
   if (storage == null) return false;
   try {
-    const safe = workspaceSchema.parse({
+    const safe = persistedWorkspaceSchema.parse({
       version: WORKSPACE_VERSION,
       selectedSymbol: input.selectedSymbol,
       timeframe: input.timeframe,
       theme: input.theme,
-      showVolume: input.showVolume,
-      autoReconnect: input.autoReconnect,
     });
     storage.setItem(key, JSON.stringify(safe));
     return true;
@@ -110,6 +128,20 @@ export function clearWorkspace(
   }
 }
 
+function hydrateWorkspace(
+  input: z.infer<typeof persistedWorkspaceSchema>,
+  fallback: WorkspaceState,
+): WorkspaceState {
+  return Object.freeze({
+    version: WORKSPACE_VERSION,
+    selectedSymbol: input.selectedSymbol,
+    timeframe: input.timeframe,
+    theme: input.theme,
+    showVolume: fallback.showVolume,
+    autoReconnect: fallback.autoReconnect,
+  });
+}
+
 function migrateLegacyWorkspace(
   input: unknown,
   fallback: WorkspaceState,
@@ -118,15 +150,17 @@ function migrateLegacyWorkspace(
   if (!legacy.success) return undefined;
   const timeframe = normalizeLegacyTimeframe(legacy.data.resolution);
   if (timeframe == null) return undefined;
-  const migrated = workspaceSchema.safeParse({
+  const migrated = persistedWorkspaceSchema.safeParse({
     version: WORKSPACE_VERSION,
     selectedSymbol: legacy.data.symbol,
     timeframe,
     theme: legacy.data.theme ?? fallback.theme,
-    showVolume: legacy.data.volume ?? fallback.showVolume,
-    autoReconnect: fallback.autoReconnect,
   });
-  return migrated.success ? Object.freeze(migrated.data) : undefined;
+  if (!migrated.success) return undefined;
+  return Object.freeze({
+    ...hydrateWorkspace(migrated.data, fallback),
+    showVolume: legacy.data.volume ?? fallback.showVolume,
+  });
 }
 
 function normalizeLegacyTimeframe(value: string): Timeframe | undefined {
