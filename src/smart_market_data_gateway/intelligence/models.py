@@ -1,8 +1,9 @@
+from collections.abc import Mapping
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Annotated, Mapping, Self
+from typing import Annotated, Self
 from uuid import UUID, uuid4
 
 from pydantic import (
