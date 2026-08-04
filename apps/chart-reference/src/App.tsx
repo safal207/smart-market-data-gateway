@@ -26,6 +26,11 @@ import {
   type Timeframe,
 } from "./engine";
 import {
+  mergeHistoryWithLive,
+  useCandleHistory,
+  type CandleHistorySnapshot,
+} from "./history";
+import {
   GatewayWebSocketSource,
   ReplayMarketDataSource,
   SmartSubscriptionManager,
@@ -49,6 +54,8 @@ const TIMEFRAME_OPTIONS = Object.freeze([
   { value: "1m", label: "1 minute" },
   { value: "5m", label: "5 minutes" },
   { value: "15m", label: "15 minutes" },
+  { value: "1h", label: "1 hour" },
+  { value: "1d", label: "1 day" },
 ]);
 const EMPTY_SNAPSHOT: MarketDataStoreSnapshot = Object.freeze({
   revision: 0,
@@ -83,11 +90,20 @@ export function App() {
   );
   const [paused, setPaused] = useState(false);
   const [frozenSnapshot, setFrozenSnapshot] = useState<MarketDataStoreSnapshot | null>(null);
+  const [frozenHistory, setFrozenHistory] = useState<CandleHistorySnapshot | null>(null);
   const [runtime, setRuntime] = useState<Runtime | null>(null);
   const [runtimeRevision, setRuntimeRevision] = useState(0);
+  const [historyRevision, setHistoryRevision] = useState(0);
   const [freshnessNowMs, setFreshnessNowMs] = useState(() => Date.now());
   const tokenRef = useRef(gatewayToken);
   const pausedRef = useRef(paused);
+  const history = useCandleHistory({
+    enabled: sourceMode === "gateway",
+    symbol,
+    timeframe,
+    token: gatewayToken,
+    reloadRevision: historyRevision,
+  });
 
   useEffect(() => { tokenRef.current = gatewayToken; }, [gatewayToken]);
   useEffect(() => { pausedRef.current = paused; }, [paused]);
@@ -150,14 +166,21 @@ export function App() {
   );
   const liveSnapshot = useSyncExternalStore(subscribeStore, getStoreSnapshot, getStoreSnapshot);
   const snapshot = paused && frozenSnapshot != null ? frozenSnapshot : liveSnapshot;
+  const displayedHistory = paused && frozenHistory != null ? frozenHistory : history;
 
   const model = useMemo<ChartWorkspaceModel>(() => {
     const latestPoint = snapshot.latestPoints[symbol] ?? null;
     const quote = latestPoint?.quote ?? snapshot.latestQuotes[symbol] ?? null;
-    const candles = (snapshot.candles[symbol] ?? []).map(toChartCandle);
+    const liveCandles = (snapshot.candles[symbol] ?? []).map(toChartCandle);
+    const candles = sourceMode === "gateway"
+      ? mergeHistoryWithLive(displayedHistory.candles, liveCandles)
+      : liveCandles;
     const accepted = snapshot.acceptedLog.filter((entry) => entry.quote.symbol === symbol);
-    const recentPrices = accepted.slice(-64).map((entry) => entry.quote.price);
-    const precision = derivePricePrecision({ observedPrices: recentPrices }).precision;
+    const livePrices = accepted.slice(-64).map((entry) => entry.quote.price);
+    const observedPrices = livePrices.length > 0
+      ? livePrices
+      : candles.slice(-64).map((candle) => candle.close);
+    const precision = derivePricePrecision({ observedPrices }).precision;
     const previousQuote = accepted.at(-2)?.quote;
     const latestAgeMs = latestPoint == null ? undefined : marketDataAgeMs(latestPoint, freshnessNowMs);
     const stale = sourceMode === "gateway" && latestPoint != null
@@ -202,10 +225,29 @@ export function App() {
         rejected: snapshot.quarantineLog.filter((entry) => entry.point.quote.symbol === symbol).length,
         gaps: accepted.filter((entry) => entry.acceptedReason === "sequence_gap").length,
       },
+      ...(sourceMode === "gateway" ? {
+        history: {
+          state: displayedHistory.state,
+          count: displayedHistory.count,
+          ...(displayedHistory.source == null ? {} : { source: displayedHistory.source }),
+          warnings: displayedHistory.warnings,
+          detail: displayedHistory.detail,
+        },
+      } : {}),
       paused,
       gatewayToken,
     };
-  }, [freshnessNowMs, gatewayToken, paused, snapshot, sourceMode, symbol, theme, timeframe]);
+  }, [
+    displayedHistory,
+    freshnessNowMs,
+    gatewayToken,
+    paused,
+    snapshot,
+    sourceMode,
+    symbol,
+    theme,
+    timeframe,
+  ]);
 
   const actions = useMemo<ChartWorkspaceActions>(() => ({
     selectSymbol: setSymbol,
@@ -215,13 +257,18 @@ export function App() {
     setGatewayToken,
     togglePaused: () => {
       setFrozenSnapshot(paused ? null : liveSnapshot);
+      setFrozenHistory(paused ? null : history);
       setPaused(!paused);
     },
     reconnect: () => {
-      if (runtime?.source instanceof GatewayWebSocketSource) runtime.source.reconnectNow();
-      else setRuntimeRevision((current) => current + 1);
+      if (runtime?.source instanceof GatewayWebSocketSource) {
+        setHistoryRevision((current) => current + 1);
+        runtime.source.reconnectNow();
+      } else {
+        setRuntimeRevision((current) => current + 1);
+      }
     },
-  }), [liveSnapshot, paused, runtime]);
+  }), [history, liveSnapshot, paused, runtime]);
 
   return <ChartWorkspace model={model} actions={actions} />;
 }
