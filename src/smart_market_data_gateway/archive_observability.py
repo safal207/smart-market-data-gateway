@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 import logging
 import time
-from typing import Any, Mapping
+from typing import Any
 
 from prometheus_client import CollectorRegistry, Counter, Gauge
 from redis.asyncio import Redis
