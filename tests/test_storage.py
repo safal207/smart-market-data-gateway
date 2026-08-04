@@ -5,13 +5,22 @@ from smart_market_data_gateway.domain import QuoteEvent
 from smart_market_data_gateway.storage import RedisStore
 
 
-def quote(symbol: str = "AAPL", sequence: int = 1) -> QuoteEvent:
+def quote(
+    symbol: str = "AAPL",
+    sequence: int = 1,
+    *,
+    timestamp: datetime | None = None,
+    price: str = "100.01",
+) -> QuoteEvent:
+    observed_at = timestamp or datetime.now(UTC)
+    value = Decimal(price)
     return QuoteEvent(
         symbol=symbol,
-        price=Decimal("100.01"),
-        bid=Decimal("100.00"),
-        ask=Decimal("100.02"),
-        provider_timestamp=datetime.now(UTC),
+        price=value,
+        bid=value - Decimal("0.01"),
+        ask=value + Decimal("0.01"),
+        provider_timestamp=observed_at,
+        received_at=observed_at,
         sequence=sequence,
         provider="test-provider",
     )
@@ -54,6 +63,35 @@ async def test_stale_snapshot_and_many(redis_client, test_settings) -> None:
     assert result["AAPL"] is not None
     assert result["AAPL"].stale is True
     assert result["UNKNOWN"] is None
+
+
+async def test_server_side_candle_history(redis_client, test_settings) -> None:
+    store = RedisStore(redis_client, test_settings)
+    start = datetime.now(UTC).replace(second=0, microsecond=0)
+    events = [
+        quote(sequence=1, timestamp=start + timedelta(seconds=5), price="100"),
+        quote(sequence=2, timestamp=start + timedelta(seconds=40), price="103"),
+        quote(sequence=3, timestamp=start + timedelta(minutes=2, seconds=5), price="101"),
+        quote(sequence=4, timestamp=start + timedelta(minutes=2, seconds=40), price="98"),
+    ]
+    for event in events:
+        await store.cache_quote(event)
+
+    series = await store.get_candles(
+        "aapl",
+        timeframe="5m",
+        limit=2,
+        end=start + timedelta(minutes=5, seconds=1),
+    )
+
+    assert series.returned_count == 1
+    candle = series.data[0]
+    assert candle.open == Decimal("100")
+    assert candle.high == Decimal("103")
+    assert candle.low == Decimal("98")
+    assert candle.close == Decimal("98")
+    assert candle.activity_count == 4
+    assert candle.closed is True
 
 
 async def test_stream_retry_dlq_rate_limit_and_usage(redis_client, test_settings) -> None:
