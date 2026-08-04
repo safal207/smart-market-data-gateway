@@ -64,3 +64,68 @@ groups:
           severity: warning
         annotations:
           summary: Asynchronous billable-usage records are being dropped
+
+  - name: candle-archive-durability
+    rules:
+      - alert: CandleArchiveExporterDown
+        expr: up{job="smart-market-data-candle-archive"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Candle archive worker metrics endpoint is unreachable
+          description: The archive worker may be stopped, restarting, or unable to expose metrics on port 9102.
+
+      - alert: CandleArchiveMonitorUnavailable
+        expr: smdg_candle_archive_monitor_up{job="smart-market-data-candle-archive"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Candle archive worker cannot inspect its Redis consumer group
+          description: Archiving may continue, but lag and trim safety are currently unknown.
+
+      - alert: CandleArchiveConsumerGroupMissing
+        expr: smdg_candle_archive_consumer_group_present{job="smart-market-data-candle-archive"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Candle archive Redis consumer group is missing
+          description: Retained quote entries are not owned by the configured durable archive group.
+
+      - alert: CandleArchiveNoConsumers
+        expr: smdg_candle_archive_consumers{job="smart-market-data-candle-archive"} == 0 and smdg_candle_archive_backlog_entries{job="smart-market-data-candle-archive"} > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Candle archive backlog exists without a registered consumer
+          description: Start or recover the candle-archive worker before the quote stream trims unarchived entries.
+
+      - alert: CandleArchiveBacklogStale
+        expr: smdg_candle_archive_oldest_backlog_age_seconds{job="smart-market-data-candle-archive"} > 300 and smdg_candle_archive_backlog_entries{job="smart-market-data-candle-archive"} > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Candle archive backlog contains entries older than five minutes
+          description: The archive is falling behind or repeatedly retrying pending entries.
+
+      - alert: CandleArchiveTrimRisk
+        expr: smdg_candle_archive_backlog_ratio{job="smart-market-data-candle-archive"} > 0.5 and smdg_candle_archive_backlog_ratio{job="smart-market-data-candle-archive"} < 0.8
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Candle archive backlog uses more than half of stream retention capacity
+          description: Increase archive throughput or stream capacity before unarchived entries approach trimming.
+
+      - alert: CandleArchiveTrimImminent
+        expr: smdg_candle_archive_backlog_ratio{job="smart-market-data-candle-archive"} >= 0.8
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Candle archive backlog is close to quote stream trim capacity
+          description: At least 80 percent of configured stream retention is required by unarchived entries.

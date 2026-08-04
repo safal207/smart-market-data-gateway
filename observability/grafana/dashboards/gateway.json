@@ -94,16 +94,84 @@
       ],
       "title": "Backpressure and Redis lag",
       "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 0, "y": 21},
+      "id": 9,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"expr": "smdg_candle_archive_backlog_entries{job=\"smart-market-data-candle-archive\"}", "refId": "A"}],
+      "title": "Archive backlog",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "percentunit", "thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "orange", "value": 0.5}, {"color": "red", "value": 0.8}]}}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 6, "y": 21},
+      "id": 10,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"expr": "smdg_candle_archive_backlog_ratio{job=\"smart-market-data-candle-archive\"}", "refId": "A"}],
+      "title": "Archive trim risk",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 12, "y": 21},
+      "id": 11,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"expr": "smdg_candle_archive_oldest_backlog_age_seconds{job=\"smart-market-data-candle-archive\"}", "refId": "A"}],
+      "title": "Oldest archive backlog",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 5, "w": 6, "x": 18, "y": 21},
+      "id": 12,
+      "options": {"colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false}, "textMode": "auto"},
+      "targets": [{"expr": "smdg_candle_archive_trim_headroom_entries{job=\"smart-market-data-candle-archive\"}", "refId": "A"}],
+      "title": "Archive trim headroom",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 26},
+      "id": 13,
+      "options": {"legend": {"calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "single", "sort": "none"}},
+      "targets": [
+        {"expr": "smdg_candle_archive_pending_entries{job=\"smart-market-data-candle-archive\"}", "legendFormat": "pending", "refId": "A"},
+        {"expr": "smdg_candle_archive_undelivered_entries{job=\"smart-market-data-candle-archive\"}", "legendFormat": "undelivered", "refId": "B"},
+        {"expr": "smdg_candle_archive_stream_length_entries{job=\"smart-market-data-candle-archive\"}", "legendFormat": "retained stream", "refId": "C"}
+      ],
+      "title": "Candle archive backlog composition",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 26},
+      "id": 14,
+      "options": {"legend": {"calcs": [], "displayMode": "list", "placement": "bottom", "showLegend": true}, "tooltip": {"mode": "single", "sort": "none"}},
+      "targets": [
+        {"expr": "smdg_candle_archive_monitor_up{job=\"smart-market-data-candle-archive\"}", "legendFormat": "monitor up", "refId": "A"},
+        {"expr": "smdg_candle_archive_consumer_group_present{job=\"smart-market-data-candle-archive\"}", "legendFormat": "group present", "refId": "B"},
+        {"expr": "smdg_candle_archive_consumers{job=\"smart-market-data-candle-archive\"}", "legendFormat": "consumers", "refId": "C"}
+      ],
+      "title": "Candle archive worker health",
+      "type": "timeseries"
     }
   ],
   "refresh": "5s",
   "schemaVersion": 41,
-  "tags": ["market-data", "websocket", "redis", "qos"],
+  "tags": ["market-data", "websocket", "redis", "qos", "timescale", "archive"],
   "templating": {"list": []},
   "time": {"from": "now-30m", "to": "now"},
   "timepicker": {},
   "timezone": "browser",
   "title": "Smart Market Data Gateway",
   "uid": "smdg-overview",
-  "version": 1
+  "version": 2
 }

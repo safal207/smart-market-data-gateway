@@ -29,3 +29,17 @@ def test_candle_archive_pool_size_is_bounded() -> None:
 def test_candle_archive_claim_idle_must_be_positive() -> None:
     with pytest.raises(ValidationError):
         Settings(candle_archive_claim_idle_ms=0)
+
+
+def test_candle_archive_metrics_interval_is_bounded() -> None:
+    with pytest.raises(ValidationError):
+        Settings(candle_archive_metrics_interval_seconds=0)
+    with pytest.raises(ValidationError):
+        Settings(candle_archive_metrics_interval_seconds=301)
+
+
+def test_candle_archive_metrics_port_is_valid() -> None:
+    with pytest.raises(ValidationError):
+        Settings(candle_archive_metrics_port=0)
+    with pytest.raises(ValidationError):
+        Settings(candle_archive_metrics_port=65_536)

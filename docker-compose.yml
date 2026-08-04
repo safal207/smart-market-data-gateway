@@ -44,6 +44,7 @@ services:
       SMDG_CANDLE_ARCHIVE_RETENTION_SECONDS: "157680000"
       SMDG_CANDLE_ARCHIVE_POOL_MAX_SIZE: "4"
       SMDG_CANDLE_ARCHIVE_CLAIM_IDLE_MS: "30000"
+      SMDG_CANDLE_ARCHIVE_METRICS_INTERVAL_SECONDS: "5"
     ports:
       - "8000:8000"
     depends_on:
@@ -84,6 +85,9 @@ services:
     command: ["python", "-m", "smart_market_data_gateway.candle_archive_worker"]
     environment:
       <<: *gateway-environment
+      SMDG_CANDLE_ARCHIVE_METRICS_PORT: "9102"
+    expose:
+      - "9102"
     depends_on:
       redis:
         condition: service_healthy
@@ -115,6 +119,8 @@ services:
       api:
         condition: service_healthy
       collector:
+        condition: service_started
+      candle-archive:
         condition: service_started
 
   grafana:
