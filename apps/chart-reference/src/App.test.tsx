@@ -134,7 +134,10 @@ describe("App", () => {
     });
     expect(screen.getByRole("status")).toHaveTextContent("Live");
 
-    fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
+    fireEvent.change(screen.getByLabelText("Local gateway token"), {
+      target: { value: "replacement-token" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Connect with token" }));
     const secondSocket = AppTestSocket.instances[1];
     expect(secondSocket).toBeDefined();
     act(() => secondSocket?.open());
