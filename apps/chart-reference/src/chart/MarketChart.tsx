@@ -25,6 +25,7 @@ export interface MarketChartProps {
   readonly precision: number;
   readonly theme: ChartTheme;
   readonly paused: boolean;
+  readonly emptyMessage?: string;
   readonly rendererFactory?: ChartRendererFactory;
 }
 
@@ -35,6 +36,7 @@ export function MarketChart({
   precision,
   theme,
   paused,
+  emptyMessage = "Waiting for market data…",
   rendererFactory = defaultRendererFactory,
 }: MarketChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -102,7 +104,9 @@ export function MarketChart({
           </h2>
         </div>
         {latest == null ? (
-          <p className="crosshair-readout">Waiting for the first synthetic update…</p>
+          <p className="crosshair-readout" role="status" aria-live="polite">
+            {emptyMessage}
+          </p>
         ) : (
           <dl className="crosshair-readout" aria-label={label}>
             <div>
