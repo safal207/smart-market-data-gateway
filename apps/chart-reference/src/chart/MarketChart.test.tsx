@@ -129,6 +129,23 @@ describe("MarketChart", () => {
     expect(screen.getByText(/mixed reported volume/i)).toBeVisible();
   });
 
+  it("labels an all-mixed candle set as Activity", () => {
+    const { renderer } = rendererDouble();
+    render(
+      <MarketChart
+        candles={[{ ...candle, activitySource: "mixed", activityValue: 42 }]}
+        symbol="NVDA.US"
+        timeframeLabel="1 minute"
+        precision={2}
+        theme="dark"
+        paused={false}
+        rendererFactory={() => renderer}
+      />,
+    );
+    expect(screen.getByText("Activity")).toBeVisible();
+    expect(screen.getByText(/mixed reported volume/i)).toBeVisible();
+  });
+
   it("clears a previous-series crosshair when the instrument identity changes", async () => {
     const { renderer, mount } = rendererDouble();
     const rendererFactory = () => renderer;
