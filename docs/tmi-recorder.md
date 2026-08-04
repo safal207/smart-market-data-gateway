@@ -19,7 +19,7 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 
 export SMDG_RECORDER_TOKEN='dev-pro:bob'
-smdg-recorder \
+python -m smart_market_data_gateway.recorder \
   --url ws://localhost:8000/v1/stream \
   --symbol AAPL \
   --symbol TSLA \
