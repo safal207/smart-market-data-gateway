@@ -6,11 +6,11 @@ import logging
 import time
 from typing import Any, Mapping
 
+from prometheus_client import CollectorRegistry, Counter, Gauge
 from redis.asyncio import Redis
 from redis.exceptions import RedisError, ResponseError
 
 from smart_market_data_gateway.config import Settings
-from smart_market_data_gateway.metrics import GatewayMetrics
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +29,74 @@ class CandleArchiveConsumerHealth:
 
     def model_dump(self) -> dict[str, Any]:
         return asdict(self)
+
+
+class CandleArchiveMetrics:
+    """Dedicated Prometheus registry for the archive worker process."""
+
+    def __init__(self, config: Settings) -> None:
+        self.registry = CollectorRegistry(auto_describe=True)
+        self.stream_maxlen_entries = Gauge(
+            "smdg_candle_archive_stream_maxlen_entries",
+            "Configured approximate maximum retained quote stream entries",
+            registry=self.registry,
+        )
+        self.monitor_up = Gauge(
+            "smdg_candle_archive_monitor_up",
+            "Whether the most recent archive consumer health sample succeeded",
+            registry=self.registry,
+        )
+        self.consumer_group_present = Gauge(
+            "smdg_candle_archive_consumer_group_present",
+            "Whether the configured archive Redis consumer group exists",
+            registry=self.registry,
+        )
+        self.consumers = Gauge(
+            "smdg_candle_archive_consumers",
+            "Consumers registered in the candle archive Redis group",
+            registry=self.registry,
+        )
+        self.stream_length_entries = Gauge(
+            "smdg_candle_archive_stream_length_entries",
+            "Entries currently retained in the shared quote stream",
+            registry=self.registry,
+        )
+        self.pending_entries = Gauge(
+            "smdg_candle_archive_pending_entries",
+            "Quote entries delivered to archive consumers but not acknowledged",
+            registry=self.registry,
+        )
+        self.undelivered_entries = Gauge(
+            "smdg_candle_archive_undelivered_entries",
+            "Quote entries not yet delivered to the candle archive group",
+            registry=self.registry,
+        )
+        self.backlog_entries = Gauge(
+            "smdg_candle_archive_backlog_entries",
+            "Pending plus undelivered quote entries for the candle archive",
+            registry=self.registry,
+        )
+        self.backlog_ratio = Gauge(
+            "smdg_candle_archive_backlog_ratio",
+            "Archive backlog divided by configured quote stream max length",
+            registry=self.registry,
+        )
+        self.trim_headroom_entries = Gauge(
+            "smdg_candle_archive_trim_headroom_entries",
+            "Remaining entries before archive backlog reaches configured stream max length",
+            registry=self.registry,
+        )
+        self.oldest_backlog_age_seconds = Gauge(
+            "smdg_candle_archive_oldest_backlog_age_seconds",
+            "Age of the oldest pending or undelivered archive stream entry",
+            registry=self.registry,
+        )
+        self.monitor_errors = Counter(
+            "smdg_candle_archive_monitor_errors_total",
+            "Archive consumer health sampling failures",
+            registry=self.registry,
+        )
+        self.stream_maxlen_entries.set(config.stream_maxlen)
 
 
 def _mapping_value(mapping: Mapping[Any, Any], key: str, default: Any = None) -> Any:
@@ -144,7 +212,7 @@ async def collect_candle_archive_consumer_health(
 class CandleArchiveMonitor:
     """Periodically exports archive consumer lag and trim-safety metrics."""
 
-    def __init__(self, redis: Redis, config: Settings, metrics: GatewayMetrics) -> None:
+    def __init__(self, redis: Redis, config: Settings, metrics: CandleArchiveMetrics) -> None:
         self.redis = redis
         self.config = config
         self.metrics = metrics
@@ -155,8 +223,8 @@ class CandleArchiveMonitor:
         try:
             snapshot = await collect_candle_archive_consumer_health(self.redis, self.config)
         except (RedisError, TypeError, ValueError):
-            self.metrics.candle_archive_monitor_up.set(0)
-            self.metrics.candle_archive_monitor_errors.inc()
+            self.metrics.monitor_up.set(0)
+            self.metrics.monitor_errors.inc()
             logger.warning(
                 "Candle archive consumer health sampling failed",
                 extra={"event": "candle_archive_monitor_failed"},
@@ -165,24 +233,16 @@ class CandleArchiveMonitor:
             return None
 
         self.last_snapshot = snapshot
-        self.metrics.candle_archive_monitor_up.set(1)
-        self.metrics.candle_archive_consumer_group_present.set(
-            1 if snapshot.group_present else 0
-        )
-        self.metrics.candle_archive_consumers.set(snapshot.consumer_count)
-        self.metrics.candle_archive_stream_length_entries.set(
-            snapshot.stream_length_entries
-        )
-        self.metrics.candle_archive_pending_entries.set(snapshot.pending_entries)
-        self.metrics.candle_archive_undelivered_entries.set(
-            snapshot.undelivered_entries
-        )
-        self.metrics.candle_archive_backlog_entries.set(snapshot.backlog_entries)
-        self.metrics.candle_archive_backlog_ratio.set(snapshot.backlog_ratio)
-        self.metrics.candle_archive_trim_headroom_entries.set(
-            snapshot.trim_headroom_entries
-        )
-        self.metrics.candle_archive_oldest_backlog_age_seconds.set(
+        self.metrics.monitor_up.set(1)
+        self.metrics.consumer_group_present.set(1 if snapshot.group_present else 0)
+        self.metrics.consumers.set(snapshot.consumer_count)
+        self.metrics.stream_length_entries.set(snapshot.stream_length_entries)
+        self.metrics.pending_entries.set(snapshot.pending_entries)
+        self.metrics.undelivered_entries.set(snapshot.undelivered_entries)
+        self.metrics.backlog_entries.set(snapshot.backlog_entries)
+        self.metrics.backlog_ratio.set(snapshot.backlog_ratio)
+        self.metrics.trim_headroom_entries.set(snapshot.trim_headroom_entries)
+        self.metrics.oldest_backlog_age_seconds.set(
             snapshot.oldest_backlog_age_seconds
         )
         return snapshot
