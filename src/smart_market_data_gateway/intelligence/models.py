@@ -36,7 +36,7 @@ class HypothesisState(StrEnum):
 
 
 class EvidenceRef(BaseModel):
-    """Stable pointer from an analytical claim to its source evidence."""
+    """Stable pointer from an analytical claim to source and knowledge time."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -44,14 +44,15 @@ class EvidenceRef(BaseModel):
     provenance_component: str = Field(min_length=1, max_length=128)
     locator: str = Field(min_length=1, max_length=512)
     observed_at: datetime
+    received_at: datetime
     record_hash: Sha256Hex | None = None
     ledger_index: NonNegativeInteger | None = None
 
-    @field_validator("observed_at")
+    @field_validator("observed_at", "received_at")
     @classmethod
     def require_timezone(cls, value: datetime) -> datetime:
         if value.tzinfo is None or value.utcoffset() is None:
-            raise ValueError("observed_at must include timezone information")
+            raise ValueError("evidence timestamps must include timezone information")
         return value
 
     @model_validator(mode="after")
@@ -95,6 +96,8 @@ class MarketObservation(BaseModel):
     def validate_temporal_bounds(self) -> Self:
         if self.expires_at is not None and self.expires_at <= self.observed_at:
             raise ValueError("expires_at must be later than observed_at")
+        if any(reference.received_at > self.received_at for reference in self.evidence):
+            raise ValueError("observation cannot cite evidence learned after received_at")
         return self
 
 
@@ -121,9 +124,12 @@ class Hypothesis(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def validate_deadline(self) -> Self:
+    def validate_deadline_and_knowledge(self) -> Self:
         if self.deadline <= self.created_at:
             raise ValueError("deadline must be later than created_at")
+        evidence = self.supporting_evidence + self.counter_evidence
+        if any(reference.received_at > self.created_at for reference in evidence):
+            raise ValueError("hypothesis evidence was not known at created_at")
         return self
 
 
@@ -139,6 +145,7 @@ class LedgerEntry(BaseModel):
     occurred_at: datetime
     reason: str = Field(min_length=1, max_length=2_000)
     evidence: tuple[EvidenceRef, ...] = ()
+    hypothesis: Hypothesis | None = None
     previous_record_hash: Sha256Hex
     record_hash: Sha256Hex
 
