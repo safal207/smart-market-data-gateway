@@ -24,6 +24,8 @@ Use TimescaleDB 2.28.3 on PostgreSQL 17 as the durable candle archive while reta
 9. The worker uses `XAUTOCLAIM` with a persistent scan cursor to recover stale pending entries even while new quotes continue arriving.
 10. Database and network failures leave valid entries pending indefinitely. Only repeatedly malformed payloads are moved to the dead-letter stream.
 11. The local Docker stack pins `timescale/timescaledb:2.28.3-pg17` and runs a dedicated `candle-archive` worker.
+12. The archive worker exposes a dedicated Prometheus registry on port 9102. It measures consumer-group presence, registered consumers, pending and undelivered entries, total backlog, backlog-to-stream-capacity ratio, trim headroom, and oldest backlog age.
+13. Prometheus alerts separately identify an unreachable worker, failed Redis sampling, a missing consumer group, absent consumers, stale backlog, warning-level trim pressure, and imminent trim risk.
 
 ## Invariants
 
@@ -32,12 +34,16 @@ Use TimescaleDB 2.28.3 on PostgreSQL 17 as the durable candle archive while reta
 - Redis expiry cannot delete durable archive rows.
 - A database outage cannot stop the live quote processor or cause valid archive entries to be acknowledged.
 - A crashed archive consumer cannot strand a pending entry permanently.
+- An unreachable archive worker produces a scrape-target failure rather than misleading zero-valued API metrics.
+- Archive backlog is defined as pending plus never-delivered entries for the archive group.
 - A Redis hot-layer outage may degrade recent history, but archived history remains queryable when PostgreSQL is available.
 - `activity_count` remains accepted quote observations, not exchange trade volume.
 
 ## Retention
 
-Redis hot retention defaults to 30 days. The archive defaults to five years and installs a Timescale retention policy when the extension is available. Operators must size the Redis stream so the archive consumer cannot be trimmed while lagging; pending-entry monitoring and alerting are required before production rollout.
+Redis hot retention defaults to 30 days. The archive defaults to five years and installs a Timescale retention policy when the extension is available.
+
+The quote stream uses approximate `MAXLEN` trimming, which is not consumer-aware. Operators must size `stream_maxlen` so the archive can survive the expected database outage and recovery window. The worker exports backlog divided by configured stream capacity. Warning and critical alerts fire at 50% and 80% respectively; these defaults are operational guardrails, not guarantees that Redis will trim at an exact boundary.
 
 ## Consequences
 
@@ -47,18 +53,21 @@ Redis hot retention defaults to 30 days. The archive defaults to five years and 
 - Reuses PostgreSQL operations, credentials, backups, and the existing Python driver.
 - Keeps database latency and outages off the live delivery path.
 - Supports deterministic replay and later continuous aggregates.
+- Makes stream-retention risk visible before unarchived events are trimmed.
+- Keeps archive health metrics owned by the worker whose failure they describe.
 
 ### Negative
 
 - The archive is eventually consistent with the quote stream.
 - The event-id idempotency table grows with accepted observations.
-- A prolonged database outage grows the archive consumer pending list and therefore requires stream-capacity and lag monitoring.
+- A prolonged database outage grows the archive consumer pending list and requires enough Redis stream capacity for recovery.
+- Approximate Redis trimming means backlog ratio is a risk indicator rather than an exact loss countdown.
 - PostgreSQL aggregation is sufficient for this stage but may eventually require continuous aggregates or a ClickHouse export for very large cross-symbol research workloads.
 - Updating an existing Timescale retention duration requires an explicit migration; `if_not_exists` does not rewrite an existing policy.
 
 ## Follow-up
 
-- Add archive consumer-lag metrics and alerts.
 - Add Timescale continuous aggregates for heavily requested timeframes after query evidence justifies them.
 - Add backup/restore verification for the archive volume.
+- Calibrate backlog thresholds from measured provider throughput and database recovery time.
 - Re-evaluate ClickHouse only when cross-symbol analytical scans exceed the operationally acceptable PostgreSQL envelope.
