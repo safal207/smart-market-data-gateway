@@ -3,9 +3,37 @@
     "/health/live": ["get"],
     "/health/ready": ["get"],
     "/v1/quotes/{symbol}": ["get"],
-    "/v1/quotes": ["get"]
+    "/v1/quotes": ["get"],
+    "/v1/candles/{symbol}": ["get"]
   },
   "schemas": {
+    "Candle": [
+      "symbol",
+      "timeframe",
+      "open_time",
+      "close_time",
+      "open",
+      "high",
+      "low",
+      "close",
+      "activity_count",
+      "first_observation",
+      "last_observation",
+      "closed"
+    ],
+    "CandleSeries": [
+      "schema_version",
+      "symbol",
+      "timeframe",
+      "source",
+      "requested_limit",
+      "returned_count",
+      "retention_seconds",
+      "period_start",
+      "period_end",
+      "data",
+      "warnings"
+    ],
     "HTTPValidationError": ["detail"],
     "ValidationError": ["loc", "msg", "type"]
   },
