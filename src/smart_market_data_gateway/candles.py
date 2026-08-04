@@ -42,6 +42,8 @@ def history_window(
 ) -> tuple[datetime, datetime]:
     if limit < 1:
         raise ValueError("limit must be positive")
+    if end.tzinfo is None or end.utcoffset() is None:
+        raise ValueError("end must include timezone information")
     interval_seconds = timeframe_seconds(timeframe)
     effective_end = end.astimezone(UTC)
     last_bucket = floor_time(effective_end, interval_seconds)
@@ -75,16 +77,17 @@ class BaseMinuteCandle(BaseModel):
 
     @classmethod
     def from_quote(cls, event: QuoteEvent) -> "BaseMinuteCandle":
+        event_timestamp = event.provider_timestamp.astimezone(UTC)
         return cls(
             symbol=event.symbol,
-            open_time=floor_time(event.provider_timestamp, 60),
+            open_time=floor_time(event_timestamp, 60),
             open=event.price,
             high=event.price,
             low=event.price,
             close=event.price,
             activity_count=1,
-            first_provider_timestamp=event.provider_timestamp,
-            last_provider_timestamp=event.provider_timestamp,
+            first_provider_timestamp=event_timestamp,
+            last_provider_timestamp=event_timestamp,
             first_event_id=event.event_id,
             last_event_id=event.event_id,
         )
@@ -92,12 +95,13 @@ class BaseMinuteCandle(BaseModel):
     def with_quote(self, event: QuoteEvent) -> "BaseMinuteCandle":
         if event.symbol != self.symbol:
             raise ValueError("quote symbol does not match candle symbol")
-        if floor_time(event.provider_timestamp, 60) != self.open_time:
+        event_timestamp = event.provider_timestamp.astimezone(UTC)
+        if floor_time(event_timestamp, 60) != self.open_time:
             raise ValueError("quote does not belong to this minute candle")
 
         first_key = (self.first_provider_timestamp, str(self.first_event_id))
         last_key = (self.last_provider_timestamp, str(self.last_event_id))
-        event_key = (event.provider_timestamp.astimezone(UTC), str(event.event_id))
+        event_key = (event_timestamp, str(event.event_id))
 
         update: dict[str, object] = {
             "high": max(self.high, event.price),
@@ -107,13 +111,13 @@ class BaseMinuteCandle(BaseModel):
         if event_key < first_key:
             update.update(
                 open=event.price,
-                first_provider_timestamp=event.provider_timestamp,
+                first_provider_timestamp=event_timestamp,
                 first_event_id=event.event_id,
             )
         if event_key > last_key:
             update.update(
                 close=event.price,
-                last_provider_timestamp=event.provider_timestamp,
+                last_provider_timestamp=event_timestamp,
                 last_event_id=event.event_id,
             )
         return self.model_copy(update=update)
