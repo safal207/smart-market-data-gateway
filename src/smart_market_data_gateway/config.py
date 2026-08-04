@@ -75,11 +75,14 @@ class Settings(BaseSettings):
     quote_pubsub_channel: str = "smdg:quotes:fanout:v1"
     control_stream: str = "smdg:subscriptions:control:v1"
     usage_stream: str = "smdg:usage:v1"
+    candle_archive_stream: str = "smdg:candles:archive:v1"
     dead_letter_stream: str = "smdg:dead-letter:v1"
     stream_group: str = "smdg:processors:v1"
     control_group: str = "smdg:collectors:v1"
     usage_group: str = "smdg:usage-writers:v1"
+    candle_archive_group: str = "smdg:candle-archive-writers:v1"
     stream_maxlen: int = 100_000
+    candle_archive_stream_maxlen: int = Field(default=1_000_000, ge=1_000)
     retry_limit: int = 3
     dedupe_ttl_seconds: int = 3600
 
@@ -89,6 +92,12 @@ class Settings(BaseSettings):
         gt=0,
     )
     candle_update_retry_limit: int = Field(default=8, ge=1)
+    candle_archive_enabled: bool = False
+    candle_archive_retention_seconds: int = Field(
+        default=5 * 365 * 24 * 60 * 60,
+        gt=0,
+    )
+    candle_archive_pool_max_size: int = Field(default=4, ge=1, le=32)
     subscription_grace_seconds: float = 3.0
     subscription_ttl_seconds: int = 60
     heartbeat_seconds: float = 15.0
