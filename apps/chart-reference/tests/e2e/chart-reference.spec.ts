@@ -63,3 +63,47 @@ test("gateway token remains out of persisted workspace settings", async ({ page 
   const persisted = await page.evaluate(() => JSON.stringify(window.localStorage));
   expect(persisted).not.toContain("local-e2e-token-that-must-not-persist");
 });
+
+test("an open gateway socket without quotes never claims Live", async ({ page }) => {
+  await page.addInitScript(() => {
+    class SilentWebSocket {
+      readyState = 0;
+      onopen: ((event: Event) => void) | null = null;
+      onmessage: ((event: MessageEvent) => void) | null = null;
+      onerror: ((event: Event) => void) | null = null;
+      onclose: ((event: CloseEvent) => void) | null = null;
+
+      constructor(readonly url: string | URL) {
+        window.setTimeout(() => {
+          this.readyState = 1;
+          this.onopen?.(new Event("open"));
+        }, 0);
+      }
+
+      send(): void {
+        // The silent gateway accepts commands but intentionally publishes no quotes.
+      }
+
+      close(): void {
+        this.readyState = 3;
+      }
+    }
+
+    Object.defineProperty(window, "WebSocket", {
+      configurable: true,
+      writable: true,
+      value: SilentWebSocket,
+    });
+  });
+
+  await page.goto("/?source=gateway");
+  await expect(page.getByRole("status")).toContainText("Connecting");
+  await expect(page.getByText("Waiting for market data…")).toBeVisible();
+  await expect(page.getByRole("status")).not.toContainText("Live");
+
+  await expect(page.getByRole("status")).toContainText("No data", { timeout: 7_000 });
+  await expect(
+    page.getByText("No market data is available for this instrument and timeframe."),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Reconnect" })).toBeVisible();
+});
