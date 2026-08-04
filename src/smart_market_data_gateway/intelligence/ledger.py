@@ -48,7 +48,7 @@ class PredictionLedger:
         *,
         reason: str = "hypothesis_registered",
     ) -> LedgerEntry:
-        """Register a hypothesis and move it from `NO_SIGNAL` to `WATCH`."""
+        """Register and hash-bind a hypothesis before any outcome is known."""
 
         if hypothesis.hypothesis_id in self._hypotheses:
             raise ValueError("hypothesis_id already exists")
@@ -59,6 +59,7 @@ class PredictionLedger:
             occurred_at=hypothesis.created_at,
             reason=reason,
             evidence=hypothesis.supporting_evidence,
+            hypothesis=hypothesis,
         )
         self._hypotheses[hypothesis.hypothesis_id] = hypothesis
         self._states[hypothesis.hypothesis_id] = HypothesisState.WATCH
@@ -74,10 +75,11 @@ class PredictionLedger:
         reason: str,
         evidence: Iterable[EvidenceRef] = (),
     ) -> LedgerEntry:
-        """Apply one legal terminal transition with explicit evidence."""
+        """Apply one legal terminal transition with evidence known at that time."""
 
         self._require_timezone(occurred_at)
-        if hypothesis_id not in self._hypotheses:
+        hypothesis = self._hypotheses.get(hypothesis_id)
+        if hypothesis is None:
             raise KeyError(f"unknown hypothesis_id: {hypothesis_id}")
         from_state = self._states[hypothesis_id]
         if to_state not in _ALLOWED_TRANSITIONS[from_state]:
@@ -87,8 +89,15 @@ class PredictionLedger:
             raise ValueError("transition occurred_at must not precede the prior transition")
 
         evidence_tuple = tuple(evidence)
-        if to_state in {HypothesisState.CONFIRMED, HypothesisState.INVALIDATED} and not evidence_tuple:
-            raise ValueError(f"{to_state} transition requires evidence")
+        if any(reference.received_at > occurred_at for reference in evidence_tuple):
+            raise ValueError("transition evidence was not known at occurred_at")
+        if to_state in {HypothesisState.CONFIRMED, HypothesisState.INVALIDATED}:
+            if not evidence_tuple:
+                raise ValueError(f"{to_state} transition requires evidence")
+            if occurred_at >= hypothesis.deadline:
+                raise ValueError("hypothesis deadline elapsed before resolution")
+        if to_state is HypothesisState.EXPIRED and occurred_at < hypothesis.deadline:
+            raise ValueError("hypothesis cannot expire before its deadline")
 
         entry = self._append_entry(
             hypothesis_id=hypothesis_id,
@@ -97,6 +106,7 @@ class PredictionLedger:
             occurred_at=occurred_at,
             reason=reason,
             evidence=evidence_tuple,
+            hypothesis=None,
         )
         self._states[hypothesis_id] = to_state
         self._latest[hypothesis_id] = entry
@@ -143,6 +153,7 @@ class PredictionLedger:
         occurred_at: datetime,
         reason: str,
         evidence: tuple[EvidenceRef, ...],
+        hypothesis: Hypothesis | None,
     ) -> LedgerEntry:
         self._require_timezone(occurred_at)
         if to_state not in _ALLOWED_TRANSITIONS[from_state]:
@@ -158,6 +169,7 @@ class PredictionLedger:
             occurred_at=occurred_at,
             reason=reason,
             evidence=evidence,
+            hypothesis=hypothesis,
             previous_record_hash=previous_record_hash,
         )
         entry = LedgerEntry(
@@ -168,6 +180,7 @@ class PredictionLedger:
             occurred_at=occurred_at,
             reason=reason,
             evidence=evidence,
+            hypothesis=hypothesis,
             previous_record_hash=previous_record_hash,
             record_hash=_hash_payload(payload),
         )
@@ -185,6 +198,7 @@ def verify_ledger_entries(entries: Iterable[LedgerEntry]) -> None:
 
     previous_record_hash = GENESIS_HASH
     states: dict[UUID, HypothesisState] = {}
+    hypotheses: dict[UUID, Hypothesis] = {}
     latest_times: dict[UUID, datetime] = {}
 
     for expected_index, entry in enumerate(entries):
@@ -201,11 +215,33 @@ def verify_ledger_entries(entries: Iterable[LedgerEntry]) -> None:
         prior_time = latest_times.get(entry.hypothesis_id)
         if prior_time is not None and entry.occurred_at < prior_time:
             raise ValueError(f"hypothesis time regression at index {expected_index}")
-        if (
-            entry.to_state in {HypothesisState.CONFIRMED, HypothesisState.INVALIDATED}
-            and not entry.evidence
-        ):
-            raise ValueError(f"resolved transition lacks evidence at index {expected_index}")
+        if any(reference.received_at > entry.occurred_at for reference in entry.evidence):
+            raise ValueError(f"future evidence at index {expected_index}")
+
+        registered = hypotheses.get(entry.hypothesis_id)
+        if entry.from_state is HypothesisState.NO_SIGNAL:
+            if entry.hypothesis is None:
+                raise ValueError(f"registration lacks hypothesis at index {expected_index}")
+            if entry.hypothesis.hypothesis_id != entry.hypothesis_id:
+                raise ValueError(f"hypothesis ID mismatch at index {expected_index}")
+            if entry.hypothesis.created_at != entry.occurred_at:
+                raise ValueError(f"registration time mismatch at index {expected_index}")
+            if entry.evidence != entry.hypothesis.supporting_evidence:
+                raise ValueError(f"registration evidence mismatch at index {expected_index}")
+            hypotheses[entry.hypothesis_id] = entry.hypothesis
+            registered = entry.hypothesis
+        elif entry.hypothesis is not None:
+            raise ValueError(f"non-registration embeds hypothesis at index {expected_index}")
+
+        if registered is None:
+            raise ValueError(f"transition precedes registration at index {expected_index}")
+        if entry.to_state in {HypothesisState.CONFIRMED, HypothesisState.INVALIDATED}:
+            if not entry.evidence:
+                raise ValueError(f"resolved transition lacks evidence at index {expected_index}")
+            if entry.occurred_at >= registered.deadline:
+                raise ValueError(f"late resolution at index {expected_index}")
+        if entry.to_state is HypothesisState.EXPIRED and entry.occurred_at < registered.deadline:
+            raise ValueError(f"early expiry at index {expected_index}")
 
         payload = _entry_payload(
             ledger_index=entry.ledger_index,
@@ -215,6 +251,7 @@ def verify_ledger_entries(entries: Iterable[LedgerEntry]) -> None:
             occurred_at=entry.occurred_at,
             reason=entry.reason,
             evidence=entry.evidence,
+            hypothesis=entry.hypothesis,
             previous_record_hash=entry.previous_record_hash,
         )
         if entry.record_hash != _hash_payload(payload):
@@ -234,6 +271,7 @@ def _entry_payload(
     occurred_at: datetime,
     reason: str,
     evidence: tuple[EvidenceRef, ...],
+    hypothesis: Hypothesis | None,
     previous_record_hash: str,
 ) -> dict[str, object]:
     return {
@@ -244,6 +282,7 @@ def _entry_payload(
         "occurred_at": occurred_at,
         "reason": reason,
         "evidence": evidence,
+        "hypothesis": hypothesis,
         "previous_record_hash": previous_record_hash,
     }
 
@@ -265,7 +304,7 @@ def _jsonable(value: object) -> object:
         return str(value)
     if isinstance(value, StrEnum):
         return value.value
-    if isinstance(value, EvidenceRef):
+    if isinstance(value, (EvidenceRef, Hypothesis)):
         return value.model_dump(mode="json")
     if isinstance(value, tuple):
         return [_jsonable(item) for item in value]
