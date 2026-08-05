@@ -40,6 +40,8 @@ class ResearchCaptureResult:
     finished_at: str
     duration_seconds: float
     completion_reason: CompletionReason
+    complete: bool
+    diagnostic: str | None = None
     verified: bool = True
 
     def as_dict(self) -> dict[str, object]:
@@ -77,15 +79,21 @@ async def capture_provider_session(
     max_seconds: float,
     append: bool = False,
     fsync: bool = True,
+    connect_timeout: float = 30.0,
+    subscribe_timeout: float = 30.0,
 ) -> ResearchCaptureResult:
     """Capture provider events directly into a verified evidence ledger."""
 
     normalized_symbols = normalize_symbols(symbols)
     safe_output = validate_private_output(output, append=append)
-    if max_records <= 0:
-        raise ValueError("max_records must be positive")
+    if max_records < 0:
+        raise ValueError("max_records must not be negative")
     if max_seconds <= 0:
         raise ValueError("max_seconds must be positive")
+    if connect_timeout <= 0:
+        raise ValueError("connect_timeout must be positive")
+    if subscribe_timeout <= 0:
+        raise ValueError("subscribe_timeout must be positive")
 
     before = verify_jsonl_ledger(safe_output, allow_missing=True)
     session_id = str(uuid4())
@@ -94,9 +102,21 @@ async def capture_provider_session(
     written = 0
     completion_reason: CompletionReason = "stream_ended"
 
-    await provider.connect()
     try:
-        await provider.subscribe(normalized_symbols)
+        try:
+            async with asyncio.timeout(connect_timeout):
+                await provider.connect()
+        except TimeoutError:
+            raise RuntimeError(
+                f"provider connect exceeded the {connect_timeout:g}s timeout"
+            ) from None
+        try:
+            async with asyncio.timeout(subscribe_timeout):
+                await provider.subscribe(normalized_symbols)
+        except TimeoutError:
+            raise RuntimeError(
+                f"provider subscribe exceeded the {subscribe_timeout:g}s timeout"
+            ) from None
         with AtomicJsonlWriter(
             safe_output,
             fsync=fsync,
@@ -120,7 +140,7 @@ async def capture_provider_session(
                     )
                     writer.write(record)
                     written += 1
-                    if written >= max_records:
+                    if max_records > 0 and written >= max_records:
                         completion_reason = "max_records"
                         return
 
@@ -144,6 +164,14 @@ async def capture_provider_session(
             "verified ledger record count does not match the completed capture"
         )
 
+    complete = completion_reason == "max_seconds"
+    diagnostic: str | None = None
+    if not complete:
+        diagnostic = (
+            f"capture ended before the planned {max_seconds:g}s window: "
+            f"completion_reason={completion_reason}, records_written={written}"
+        )
+
     finished = datetime.now(UTC)
     return ResearchCaptureResult(
         output=str(safe_output),
@@ -157,6 +185,8 @@ async def capture_provider_session(
         finished_at=finished.isoformat(),
         duration_seconds=round(monotonic() - started_monotonic, 6),
         completion_reason=completion_reason,
+        complete=complete,
+        diagnostic=diagnostic,
     )
 
 
@@ -171,6 +201,8 @@ async def capture_coinbase_research_session(
     url: str = COINBASE_MARKET_DATA_URL,
     append: bool = False,
     fsync: bool = True,
+    connect_timeout: float = 30.0,
+    subscribe_timeout: float = 30.0,
 ) -> ResearchCaptureResult:
     """Run one explicitly acknowledged Coinbase personal-research capture."""
 
@@ -190,6 +222,8 @@ async def capture_coinbase_research_session(
         max_seconds=max_seconds,
         append=append,
         fsync=fsync,
+        connect_timeout=connect_timeout,
+        subscribe_timeout=subscribe_timeout,
     )
 
 
@@ -208,8 +242,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--symbol", action="append", dest="symbols")
     parser.add_argument("--output", type=Path, default=None)
-    parser.add_argument("--max-records", type=int, default=100)
+    parser.add_argument(
+        "--max-records",
+        type=int,
+        default=100,
+        help="stop after this many records; 0 means no record limit",
+    )
     parser.add_argument("--max-seconds", type=float, default=60.0)
+    parser.add_argument(
+        "--connect-timeout",
+        type=float,
+        default=30.0,
+        help="timeout in seconds for the provider connection attempt",
+    )
+    parser.add_argument(
+        "--subscribe-timeout",
+        type=float,
+        default=30.0,
+        help="timeout in seconds for the provider subscription attempt",
+    )
     parser.add_argument("--append", action="store_true")
     parser.add_argument("--no-fsync", action="store_true")
     parser.add_argument(
@@ -252,6 +303,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 url=args.url,
                 append=args.append,
                 fsync=not args.no_fsync,
+                connect_timeout=args.connect_timeout,
+                subscribe_timeout=args.subscribe_timeout,
             )
         )
     except (OSError, RuntimeError, ValueError) as exc:
@@ -259,6 +312,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     json.dump(result.as_dict(), sys.stdout, sort_keys=True)
     sys.stdout.write("\n")
+    if not result.complete:
+        return 1
     return 0
 
 

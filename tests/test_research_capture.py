@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Collection
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -26,18 +27,26 @@ class FiniteProvider(MarketDataProvider):
         self._events = events
         self._state = ProviderState.DISCONNECTED
         self.subscriptions: tuple[str, ...] = ()
+        self.connect_delay: float = 0.0
+        self.subscribe_delay: float = 0.0
+        self.disconnect_calls = 0
 
     @property
     def name(self) -> str:
         return "finite-provider"
 
     async def connect(self) -> None:
+        if self.connect_delay:
+            await asyncio.sleep(self.connect_delay)
         self._state = ProviderState.CONNECTED
 
     async def disconnect(self) -> None:
+        self.disconnect_calls += 1
         self._state = ProviderState.DISCONNECTED
 
     async def subscribe(self, symbols: Collection[str]) -> None:
+        if self.subscribe_delay:
+            await asyncio.sleep(self.subscribe_delay)
         self.subscriptions = tuple(sorted(symbols))
 
     async def unsubscribe(self, symbols: Collection[str]) -> None:
@@ -49,6 +58,21 @@ class FiniteProvider(MarketDataProvider):
     async def events(self) -> AsyncIterator[QuoteEvent]:
         for event in self._events:
             yield event
+
+
+class ContinuousProvider(FiniteProvider):
+    def __init__(self) -> None:
+        super().__init__([])
+        self._count = 0
+
+    async def events(self) -> AsyncIterator[QuoteEvent]:
+        try:
+            while True:
+                self._count += 1
+                yield quote(self._count)
+                await asyncio.sleep(0.01)
+        except asyncio.CancelledError:
+            raise
 
 
 def quote(sequence: int, price: str = "100.00") -> QuoteEvent:
@@ -139,11 +163,126 @@ def test_cli_requires_explicit_terms_acceptance() -> None:
 
 @pytest.mark.asyncio
 async def test_capture_fails_when_provider_emits_no_events(tmp_path: Path) -> None:
+    provider = FiniteProvider([])
     with pytest.raises(RuntimeError, match="no market-data events"):
         await capture_provider_session(
-            FiniteProvider([]),
+            provider,
             symbols=["BTC-USD"],
             output=tmp_path / "recordings" / "empty.jsonl",
             max_records=1,
             max_seconds=1.0,
         )
+    assert provider.disconnect_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_capture_connect_timeout_raises_and_disconnects(tmp_path: Path) -> None:
+    provider = FiniteProvider([quote(1)])
+    provider.connect_delay = 5.0
+
+    with pytest.raises(RuntimeError, match="connect exceeded"):
+        await capture_provider_session(
+            provider,
+            symbols=["BTC-USD"],
+            output=tmp_path / "recordings" / "timeout.jsonl",
+            max_records=1,
+            max_seconds=1.0,
+            connect_timeout=0.05,
+        )
+    assert provider.disconnect_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_capture_subscribe_timeout_raises_and_disconnects(tmp_path: Path) -> None:
+    provider = FiniteProvider([quote(1)])
+    provider.subscribe_delay = 5.0
+
+    with pytest.raises(RuntimeError, match="subscribe exceeded"):
+        await capture_provider_session(
+            provider,
+            symbols=["BTC-USD"],
+            output=tmp_path / "recordings" / "timeout.jsonl",
+            max_records=1,
+            max_seconds=1.0,
+            subscribe_timeout=0.05,
+        )
+    assert provider.disconnect_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_capture_stream_ended_is_incomplete_and_keeps_partial_ledger(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "recordings" / "partial.jsonl"
+
+    result = await capture_provider_session(
+        FiniteProvider([quote(1), quote(2)]),
+        symbols=["BTC-USD"],
+        output=output,
+        max_records=100,
+        max_seconds=60.0,
+    )
+
+    assert result.completion_reason == "stream_ended"
+    assert result.complete is False
+    assert result.records_written == 2
+    assert result.diagnostic is not None
+    verification = verify_jsonl_ledger(output)
+    assert verification.records == 2
+    assert verification.head_hash == result.ledger_head_hash
+
+
+@pytest.mark.asyncio
+async def test_capture_max_seconds_is_complete(tmp_path: Path) -> None:
+    output = tmp_path / "recordings" / "full.jsonl"
+
+    result = await capture_provider_session(
+        ContinuousProvider(),
+        symbols=["BTC-USD"],
+        output=output,
+        max_records=0,
+        max_seconds=0.2,
+    )
+
+    assert result.completion_reason == "max_seconds"
+    assert result.complete is True
+    assert result.diagnostic is None
+    assert result.records_written > 0
+    verification = verify_jsonl_ledger(output)
+    assert verification.records == result.records_written
+
+
+@pytest.mark.asyncio
+async def test_capture_max_records_is_incomplete_in_experiment_mode(tmp_path: Path) -> None:
+    output = tmp_path / "recordings" / "short.jsonl"
+
+    result = await capture_provider_session(
+        ContinuousProvider(),
+        symbols=["BTC-USD"],
+        output=output,
+        max_records=3,
+        max_seconds=60.0,
+    )
+
+    assert result.completion_reason == "max_records"
+    assert result.complete is False
+    assert result.records_written == 3
+    verification = verify_jsonl_ledger(output)
+    assert verification.records == 3
+
+
+@pytest.mark.asyncio
+async def test_capture_zero_max_records_does_not_stop_stream(tmp_path: Path) -> None:
+    output = tmp_path / "recordings" / "unlimited.jsonl"
+
+    result = await capture_provider_session(
+        ContinuousProvider(),
+        symbols=["BTC-USD"],
+        output=output,
+        max_records=0,
+        max_seconds=0.2,
+    )
+
+    assert result.completion_reason == "max_seconds"
+    assert result.complete is True
+    assert result.records_written > 0
