@@ -304,8 +304,12 @@ class CoinbaseResearchMarketDataProvider(MarketDataProvider):
                 self._connection = await connect(
                     self._config.url,
                     max_queue=self._config.queue_size,
-                    ping_interval=20,
-                    ping_timeout=20,
+                    open_timeout=30,
+                    close_timeout=10,
+                    # Cloudflare-backed endpoints may drop connections when the
+                    # client sends keepalive pings, so liveness is carried by
+                    # upstream ticker/heartbeat messages instead.
+                    ping_interval=None,
                 )
             except Exception as exc:
                 self._state = ProviderState.DEGRADED
