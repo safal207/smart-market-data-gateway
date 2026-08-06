@@ -110,6 +110,10 @@ async def capture_provider_session(
             raise RuntimeError(
                 f"provider connect exceeded the {connect_timeout:g}s timeout"
             ) from None
+        except Exception as exc:
+            raise RuntimeError(
+                f"provider connect failed:{type(exc).__name__}"
+            ) from exc
         try:
             async with asyncio.timeout(subscribe_timeout):
                 await provider.subscribe(normalized_symbols)
@@ -117,6 +121,10 @@ async def capture_provider_session(
             raise RuntimeError(
                 f"provider subscribe exceeded the {subscribe_timeout:g}s timeout"
             ) from None
+        except Exception as exc:
+            raise RuntimeError(
+                f"provider subscribe failed:{type(exc).__name__}"
+            ) from exc
         with AtomicJsonlWriter(
             safe_output,
             fsync=fsync,

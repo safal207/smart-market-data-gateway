@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 COINBASE_MARKET_DATA_URL = "wss://advanced-trade-ws.coinbase.com"
 COINBASE_PROVIDER_NAME = "coinbase-advanced-trade"
 COINBASE_TRADE_BATCH_WINDOW_MS = 250
+_REQUIRED_CHANNELS = ("heartbeats", "ticker", "market_trades")
 _ALLOWED_USE_MODE = "personal_research"
 
 
@@ -158,6 +159,11 @@ class CoinbaseUsageError(PermissionError):
 
 class CoinbaseProtocolError(ValueError):
     """Raised when an upstream message cannot be normalized without guessing."""
+
+
+def _failure_code(context: str, exc: BaseException) -> str:
+    """Controlled failure code without messages, URLs, or credentials."""
+    return f"{context}:{type(exc).__name__}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -393,6 +399,8 @@ class CoinbaseResearchMarketDataProvider(MarketDataProvider):
         self._reader_task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
         self._heartbeats_subscribed = False
+        self._acknowledged_channels: set[str] = set()
+        self._all_acknowledged = asyncio.Event()
         self._diagnostics = CoinbaseStreamDiagnostics()
 
     @property
@@ -426,6 +434,8 @@ class CoinbaseResearchMarketDataProvider(MarketDataProvider):
             self._message = None
             self._sync_diagnostics_state()
             self._projector.clear_connection_state()
+            self._acknowledged_channels.clear()
+            self._sync_ack_event()
             try:
                 self._connection = await connect(
                     self._config.url,
@@ -439,7 +449,7 @@ class CoinbaseResearchMarketDataProvider(MarketDataProvider):
                 )
             except Exception as exc:
                 self._state = ProviderState.DEGRADED
-                self._message = str(exc)
+                self._message = _failure_code("connection_failed", exc)
                 self._sync_diagnostics_state()
                 raise
             self._reader_task = asyncio.create_task(
@@ -460,6 +470,8 @@ class CoinbaseResearchMarketDataProvider(MarketDataProvider):
             self._state = ProviderState.DISCONNECTED
             self._message = None
             self._heartbeats_subscribed = False
+            self._acknowledged_channels.clear()
+            self._sync_ack_event()
             self._sync_diagnostics_state()
 
         if task is not None:
@@ -473,14 +485,22 @@ class CoinbaseResearchMarketDataProvider(MarketDataProvider):
         normalized = {_symbol(symbol) for symbol in symbols}
         new_symbols = sorted(normalized.difference(self._symbols))
         self._symbols.update(normalized)
-        if not new_symbols:
+        missing = [
+            channel
+            for channel in _REQUIRED_CHANNELS
+            if channel not in self._acknowledged_channels
+        ]
+        if not new_symbols and not missing:
             return
         connection = self._require_connection()
+        self._all_acknowledged.clear()
         if not self._heartbeats_subscribed:
             await connection.send(_subscription_message("subscribe", "heartbeats", ()))
             self._heartbeats_subscribed = True
         for channel in ("ticker", "market_trades"):
             await connection.send(_subscription_message("subscribe", channel, new_symbols))
+        if missing:
+            await self._all_acknowledged.wait()
 
     async def unsubscribe(self, symbols: Collection[str]) -> None:
         normalized = {_symbol(symbol) for symbol in symbols}
@@ -491,6 +511,8 @@ class CoinbaseResearchMarketDataProvider(MarketDataProvider):
         connection = self._require_connection()
         for channel in ("ticker", "market_trades"):
             await connection.send(_subscription_message("unsubscribe", channel, active))
+            self._acknowledged_channels.discard(channel)
+            self._sync_ack_event()
 
     async def health(self) -> ProviderHealth:
         return ProviderHealth(state=self._state, message=self._message)
@@ -567,7 +589,7 @@ class CoinbaseResearchMarketDataProvider(MarketDataProvider):
         except Exception as exc:
             self._diagnostics.finalize_reader("failed", type(exc).__name__)
             self._state = ProviderState.DEGRADED
-            self._message = str(exc)
+            self._message = _failure_code("reader_failed", exc)
             self._sync_diagnostics_state()
 
     def _record_subscription_acknowledgements(self, payload: Mapping[str, Any]) -> None:
@@ -589,12 +611,24 @@ class CoinbaseResearchMarketDataProvider(MarketDataProvider):
             for item in _mapping_sequence(value, f"{field}.items"):
                 name = str(item.get("name", "")).strip()
                 if name:
-                    self._diagnostics.record_subscription_acknowledgement(name)
+                    self._record_acknowledged_channel(name)
             return
         if isinstance(value, Mapping):
             for name in value:
                 if isinstance(name, str) and name:
-                    self._diagnostics.record_subscription_acknowledgement(name)
+                    self._record_acknowledged_channel(name)
+
+    def _record_acknowledged_channel(self, name: str) -> None:
+        self._diagnostics.record_subscription_acknowledgement(name)
+        if name in _REQUIRED_CHANNELS:
+            self._acknowledged_channels.add(name)
+            self._sync_ack_event()
+
+    def _sync_ack_event(self) -> None:
+        if all(channel in self._acknowledged_channels for channel in _REQUIRED_CHANNELS):
+            self._all_acknowledged.set()
+        else:
+            self._all_acknowledged.clear()
 
     def _sync_diagnostics_state(self) -> None:
         self._diagnostics.provider_state = self._state.name.lower()
