@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator, Collection
 from datetime import UTC, datetime
 from decimal import Decimal
+import json
 from pathlib import Path
 
 import pytest
+from websockets.asyncio.server import ServerConnection, serve
 
 from smart_market_data_gateway.domain import QuoteEvent
 from smart_market_data_gateway.providers.base import (
@@ -13,12 +16,19 @@ from smart_market_data_gateway.providers.base import (
     ProviderHealth,
     ProviderState,
 )
+from smart_market_data_gateway.providers.coinbase import (
+    CoinbaseResearchConfig,
+    CoinbaseResearchMarketDataProvider,
+)
 from smart_market_data_gateway.research_capture import (
+    ResearchCaptureResult,
     capture_provider_session,
     main,
     validate_private_output,
 )
 from smart_market_data_gateway.recorder import verify_jsonl_ledger
+
+import smart_market_data_gateway.research_capture as research_capture_module
 
 
 class FiniteProvider(MarketDataProvider):
@@ -26,18 +36,26 @@ class FiniteProvider(MarketDataProvider):
         self._events = events
         self._state = ProviderState.DISCONNECTED
         self.subscriptions: tuple[str, ...] = ()
+        self.connect_delay: float = 0.0
+        self.subscribe_delay: float = 0.0
+        self.disconnect_calls = 0
 
     @property
     def name(self) -> str:
         return "finite-provider"
 
     async def connect(self) -> None:
+        if self.connect_delay:
+            await asyncio.sleep(self.connect_delay)
         self._state = ProviderState.CONNECTED
 
     async def disconnect(self) -> None:
+        self.disconnect_calls += 1
         self._state = ProviderState.DISCONNECTED
 
     async def subscribe(self, symbols: Collection[str]) -> None:
+        if self.subscribe_delay:
+            await asyncio.sleep(self.subscribe_delay)
         self.subscriptions = tuple(sorted(symbols))
 
     async def unsubscribe(self, symbols: Collection[str]) -> None:
@@ -49,6 +67,21 @@ class FiniteProvider(MarketDataProvider):
     async def events(self) -> AsyncIterator[QuoteEvent]:
         for event in self._events:
             yield event
+
+
+class ContinuousProvider(FiniteProvider):
+    def __init__(self) -> None:
+        super().__init__([])
+        self._count = 0
+
+    async def events(self) -> AsyncIterator[QuoteEvent]:
+        try:
+            while True:
+                self._count += 1
+                yield quote(self._count)
+                await asyncio.sleep(0.01)
+        except asyncio.CancelledError:
+            raise
 
 
 def quote(sequence: int, price: str = "100.00") -> QuoteEvent:
@@ -139,11 +172,363 @@ def test_cli_requires_explicit_terms_acceptance() -> None:
 
 @pytest.mark.asyncio
 async def test_capture_fails_when_provider_emits_no_events(tmp_path: Path) -> None:
+    provider = FiniteProvider([])
     with pytest.raises(RuntimeError, match="no market-data events"):
         await capture_provider_session(
-            FiniteProvider([]),
+            provider,
             symbols=["BTC-USD"],
             output=tmp_path / "recordings" / "empty.jsonl",
             max_records=1,
             max_seconds=1.0,
         )
+    assert provider.disconnect_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_capture_connect_timeout_raises_and_disconnects(tmp_path: Path) -> None:
+    provider = FiniteProvider([quote(1)])
+    provider.connect_delay = 5.0
+
+    with pytest.raises(RuntimeError, match="connect exceeded"):
+        await capture_provider_session(
+            provider,
+            symbols=["BTC-USD"],
+            output=tmp_path / "recordings" / "timeout.jsonl",
+            max_records=1,
+            max_seconds=1.0,
+            connect_timeout=0.05,
+        )
+    assert provider.disconnect_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_capture_subscribe_timeout_raises_and_disconnects(tmp_path: Path) -> None:
+    provider = FiniteProvider([quote(1)])
+    provider.subscribe_delay = 5.0
+
+    with pytest.raises(RuntimeError, match="subscribe exceeded"):
+        await capture_provider_session(
+            provider,
+            symbols=["BTC-USD"],
+            output=tmp_path / "recordings" / "timeout.jsonl",
+            max_records=1,
+            max_seconds=1.0,
+            subscribe_timeout=0.05,
+        )
+    assert provider.disconnect_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_capture_stream_ended_is_incomplete_and_keeps_partial_ledger(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "recordings" / "partial.jsonl"
+
+    result = await capture_provider_session(
+        FiniteProvider([quote(1), quote(2)]),
+        symbols=["BTC-USD"],
+        output=output,
+        max_records=100,
+        max_seconds=60.0,
+    )
+
+    assert result.completion_reason == "stream_ended"
+    assert result.complete is False
+    assert result.records_written == 2
+    assert result.diagnostic is not None
+    verification = verify_jsonl_ledger(output)
+    assert verification.records == 2
+    assert verification.head_hash == result.ledger_head_hash
+
+
+@pytest.mark.asyncio
+async def test_capture_max_seconds_is_complete(tmp_path: Path) -> None:
+    output = tmp_path / "recordings" / "full.jsonl"
+
+    result = await capture_provider_session(
+        ContinuousProvider(),
+        symbols=["BTC-USD"],
+        output=output,
+        max_records=0,
+        max_seconds=0.2,
+    )
+
+    assert result.completion_reason == "max_seconds"
+    assert result.complete is True
+    assert result.diagnostic is None
+    assert result.records_written > 0
+    verification = verify_jsonl_ledger(output)
+    assert verification.records == result.records_written
+
+
+@pytest.mark.asyncio
+async def test_capture_max_records_is_incomplete_in_experiment_mode(tmp_path: Path) -> None:
+    output = tmp_path / "recordings" / "short.jsonl"
+
+    result = await capture_provider_session(
+        ContinuousProvider(),
+        symbols=["BTC-USD"],
+        output=output,
+        max_records=3,
+        max_seconds=60.0,
+    )
+
+    assert result.completion_reason == "max_records"
+    assert result.complete is False
+    assert result.records_written == 3
+    verification = verify_jsonl_ledger(output)
+    assert verification.records == 3
+
+
+@pytest.mark.asyncio
+async def test_capture_zero_max_records_does_not_stop_stream(tmp_path: Path) -> None:
+    output = tmp_path / "recordings" / "unlimited.jsonl"
+
+    result = await capture_provider_session(
+        ContinuousProvider(),
+        symbols=["BTC-USD"],
+        output=output,
+        max_records=0,
+        max_seconds=0.2,
+    )
+
+    assert result.completion_reason == "max_seconds"
+    assert result.complete is True
+    assert result.records_written > 0
+
+
+def silent_trades_message() -> dict[str, object]:
+    return {
+        "channel": "market_trades",
+        "timestamp": "2026-08-04T15:00:00.250Z",
+        "sequence_num": 11,
+        "events": [
+            {
+                "type": "update",
+                "trades": [
+                    {
+                        "trade_id": "trade-1",
+                        "product_id": "BTC-USD",
+                        "price": "100.05",
+                        "size": "0.30",
+                        "side": "SELL",
+                        "time": "2026-08-04T15:00:00.100Z",
+                    }
+                ],
+            }
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_capture_silent_stream_is_incomplete_and_keeps_valid_ledger(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "recordings" / "silent.jsonl"
+
+    async def handler(websocket: ServerConnection) -> None:
+        for _ in range(3):
+            await websocket.recv()
+        await websocket.send(
+            json.dumps(
+                {
+                    "channel": "subscriptions",
+                    "timestamp": "2026-08-04T15:00:01Z",
+                    "sequence_num": 1,
+                    "events": [
+                        {
+                            "type": "subscriptions",
+                            "subscriptions": {
+                                "heartbeats": [],
+                                "ticker": ["BTC-USD"],
+                                "market_trades": ["BTC-USD"],
+                            },
+                        }
+                    ],
+                }
+            )
+        )
+        await websocket.send(json.dumps(silent_trades_message()))
+        await asyncio.sleep(1.0)
+
+    async with serve(handler, "127.0.0.1", 0) as server:
+        sockets = server.sockets
+        assert sockets
+        port = sockets[0].getsockname()[1]
+        provider = CoinbaseResearchMarketDataProvider(
+            CoinbaseResearchConfig(
+                url=f"ws://127.0.0.1:{port}",
+                use_mode="personal_research",
+                market_data_terms_accepted=True,
+                environment="research",
+                message_idle_timeout_seconds=0.2,
+            )
+        )
+        result = await capture_provider_session(
+            provider,
+            symbols=["BTC-USD"],
+            output=output,
+            max_records=0,
+            max_seconds=60.0,
+        )
+
+    assert result.records_written == 1
+    assert result.complete is False
+    assert result.completion_reason == "stream_ended"
+    assert result.diagnostic is not None
+    verification = verify_jsonl_ledger(output)
+    assert verification.records == 1
+
+
+@pytest.mark.asyncio
+async def test_capture_silent_stream_stderr_does_not_leak_credentials(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    output = tmp_path / "recordings" / "silent-secret.jsonl"
+    secret = "super-secret-token-123"
+
+    async def handler(websocket: ServerConnection) -> None:
+        for _ in range(3):
+            await websocket.recv()
+        await websocket.send(
+            json.dumps(
+                {
+                    "channel": "subscriptions",
+                    "events": [
+                        {
+                            "type": "subscriptions",
+                            "subscriptions": {
+                                "heartbeats": [],
+                                "ticker": ["BTC-USD"],
+                                "market_trades": ["BTC-USD"],
+                            },
+                        }
+                    ],
+                }
+            )
+        )
+        await websocket.send(json.dumps(silent_trades_message()))
+        await asyncio.sleep(1.0)
+
+    async with serve(handler, "127.0.0.1", 0) as server:
+        sockets = server.sockets
+        assert sockets
+        port = sockets[0].getsockname()[1]
+        provider = CoinbaseResearchMarketDataProvider(
+            CoinbaseResearchConfig(
+                url=f"ws://user:{secret}@127.0.0.1:{port}",
+                use_mode="personal_research",
+                market_data_terms_accepted=True,
+                environment="research",
+                message_idle_timeout_seconds=0.2,
+            )
+        )
+        result = await capture_provider_session(
+            provider,
+            symbols=["BTC-USD"],
+            output=output,
+            max_records=0,
+            max_seconds=60.0,
+        )
+
+    assert result.complete is False
+    captured = capsys.readouterr()
+    assert secret not in captured.err
+    assert "user:" not in captured.err
+
+
+@pytest.mark.asyncio
+async def test_capture_subscribe_timeout_with_real_provider_disconnects(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "recordings" / "no-ack.jsonl"
+
+    async def handler(websocket: ServerConnection) -> None:
+        for _ in range(3):
+            await websocket.recv()
+        await asyncio.sleep(1.0)
+
+    async with serve(handler, "127.0.0.1", 0) as server:
+        sockets = server.sockets
+        assert sockets
+        port = sockets[0].getsockname()[1]
+        provider = CoinbaseResearchMarketDataProvider(
+            CoinbaseResearchConfig(
+                url=f"ws://127.0.0.1:{port}",
+                use_mode="personal_research",
+                market_data_terms_accepted=True,
+                environment="research",
+            )
+        )
+        with pytest.raises(RuntimeError, match="subscribe exceeded"):
+            await capture_provider_session(
+                provider,
+                symbols=["BTC-USD"],
+                output=output,
+                max_records=0,
+                max_seconds=60.0,
+                connect_timeout=5.0,
+                subscribe_timeout=0.3,
+            )
+
+    health = await provider.health()
+    assert health.state is ProviderState.DISCONNECTED
+
+
+def _research_result(complete: bool) -> ResearchCaptureResult:
+    return ResearchCaptureResult(
+        output="recordings/mocked.jsonl",
+        provider="coinbase-advanced-trade",
+        symbols=("BTC-USD",),
+        records_written=1,
+        ledger_records=1,
+        ledger_head_hash="0" * 64,
+        recorder_session_id="mocked-session",
+        started_at="2026-08-06T12:00:00+00:00",
+        finished_at="2026-08-06T12:00:01+00:00",
+        duration_seconds=1.0,
+        completion_reason="stream_ended",
+        complete=complete,
+        diagnostic="capture ended before the planned 60s window"
+        if not complete
+        else None,
+        verified=True,
+    )
+
+
+@pytest.mark.parametrize("max_records", ["0", "3"])
+def test_main_returns_1_for_incomplete_capture(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    max_records: str,
+) -> None:
+    async def fake_session(**kwargs: object) -> ResearchCaptureResult:
+        return _research_result(complete=False)
+
+    monkeypatch.setattr(
+        research_capture_module,
+        "capture_coinbase_research_session",
+        fake_session,
+    )
+
+    code = main(
+        [
+            "--symbol",
+            "BTC-USD",
+            "--output",
+            "recordings/mocked.jsonl",
+            "--max-records",
+            max_records,
+            "--max-seconds",
+            "60",
+            "--accept-current-market-data-terms",
+        ]
+    )
+
+    assert code == 1
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert payload["complete"] is False
+    assert payload["completion_reason"] == "stream_ended"
+    assert payload["diagnostic"] is not None
