@@ -4,15 +4,21 @@ import asyncio
 from collections.abc import AsyncIterator, Collection
 from datetime import UTC, datetime
 from decimal import Decimal
+import json
 from pathlib import Path
 
 import pytest
+from websockets.asyncio.server import ServerConnection, serve
 
 from smart_market_data_gateway.domain import QuoteEvent
 from smart_market_data_gateway.providers.base import (
     MarketDataProvider,
     ProviderHealth,
     ProviderState,
+)
+from smart_market_data_gateway.providers.coinbase import (
+    CoinbaseResearchConfig,
+    CoinbaseResearchMarketDataProvider,
 )
 from smart_market_data_gateway.research_capture import (
     capture_provider_session,
@@ -286,3 +292,67 @@ async def test_capture_zero_max_records_does_not_stop_stream(tmp_path: Path) -> 
     assert result.completion_reason == "max_seconds"
     assert result.complete is True
     assert result.records_written > 0
+
+
+def silent_trades_message() -> dict[str, object]:
+    return {
+        "channel": "market_trades",
+        "timestamp": "2026-08-04T15:00:00.250Z",
+        "sequence_num": 11,
+        "events": [
+            {
+                "type": "update",
+                "trades": [
+                    {
+                        "trade_id": "trade-1",
+                        "product_id": "BTC-USD",
+                        "price": "100.05",
+                        "size": "0.30",
+                        "side": "SELL",
+                        "time": "2026-08-04T15:00:00.100Z",
+                    }
+                ],
+            }
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_capture_silent_stream_is_incomplete_and_keeps_valid_ledger(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "recordings" / "silent.jsonl"
+
+    async def handler(websocket: ServerConnection) -> None:
+        for _ in range(3):
+            await websocket.recv()
+        await websocket.send(json.dumps(silent_trades_message()))
+        await asyncio.sleep(1.0)
+
+    async with serve(handler, "127.0.0.1", 0) as server:
+        sockets = server.sockets
+        assert sockets
+        port = sockets[0].getsockname()[1]
+        provider = CoinbaseResearchMarketDataProvider(
+            CoinbaseResearchConfig(
+                url=f"ws://127.0.0.1:{port}",
+                use_mode="personal_research",
+                market_data_terms_accepted=True,
+                environment="research",
+                message_idle_timeout_seconds=0.2,
+            )
+        )
+        result = await capture_provider_session(
+            provider,
+            symbols=["BTC-USD"],
+            output=output,
+            max_records=0,
+            max_seconds=60.0,
+        )
+
+    assert result.records_written == 1
+    assert result.complete is False
+    assert result.completion_reason == "stream_ended"
+    assert result.diagnostic is not None
+    verification = verify_jsonl_ledger(output)
+    assert verification.records == 1

@@ -14,6 +14,7 @@ from typing import Any, cast
 from uuid import NAMESPACE_URL, uuid5
 
 from websockets.asyncio.client import ClientConnection, connect
+from websockets.exceptions import ConnectionClosed
 
 from smart_market_data_gateway.domain import (
     DepthSemantics,
@@ -168,12 +169,15 @@ class CoinbaseResearchConfig:
     market_data_terms_accepted: bool = False
     environment: str = "development"
     queue_size: int = 10_000
+    message_idle_timeout_seconds: float = 15.0
 
     def __post_init__(self) -> None:
         if not self.url.startswith(("wss://", "ws://")):
             raise ValueError("Coinbase WebSocket URL must use ws:// or wss://")
         if self.queue_size <= 0:
             raise ValueError("queue_size must be positive")
+        if self.message_idle_timeout_seconds <= 0:
+            raise ValueError("message_idle_timeout_seconds must be positive")
 
     def validate_usage(self) -> None:
         if self.use_mode != _ALLOWED_USE_MODE:
@@ -503,8 +507,28 @@ class CoinbaseResearchMarketDataProvider(MarketDataProvider):
 
     async def _reader_loop(self) -> None:
         connection = self._require_connection()
+        idle_timeout = self._config.message_idle_timeout_seconds
         try:
-            async for raw_message in connection:
+            while True:
+                try:
+                    raw_message = await asyncio.wait_for(
+                        connection.recv(),
+                        timeout=idle_timeout,
+                    )
+                except TimeoutError:
+                    self._diagnostics.finalize_reader("stalled")
+                    self._state = ProviderState.DEGRADED
+                    self._message = (
+                        f"no upstream message within {idle_timeout:g}s"
+                    )
+                    self._sync_diagnostics_state()
+                    return
+                except ConnectionClosed:
+                    self._diagnostics.finalize_reader("ended")
+                    self._state = ProviderState.DEGRADED
+                    self._message = "upstream stream ended"
+                    self._sync_diagnostics_state()
+                    return
                 try:
                     parsed = json.loads(raw_message)
                     if not isinstance(parsed, Mapping):
@@ -537,10 +561,6 @@ class CoinbaseResearchMarketDataProvider(MarketDataProvider):
                         extra={"event": "coinbase_message_rejected"},
                         exc_info=True,
                     )
-            self._diagnostics.finalize_reader("ended")
-            self._state = ProviderState.DEGRADED
-            self._message = "upstream stream ended"
-            self._sync_diagnostics_state()
         except asyncio.CancelledError:
             self._diagnostics.finalize_reader("cancelled")
             raise

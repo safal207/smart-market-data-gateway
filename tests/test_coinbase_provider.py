@@ -5,6 +5,7 @@ import json
 
 import pytest
 from websockets.asyncio.server import ServerConnection, serve
+from websockets.exceptions import ConnectionClosed
 
 from smart_market_data_gateway.collector import build_provider
 from smart_market_data_gateway.config import Settings
@@ -14,6 +15,7 @@ from smart_market_data_gateway.domain import (
     QuantityUnit,
     VolumeKind,
 )
+from smart_market_data_gateway.providers.base import ProviderState
 from smart_market_data_gateway.providers.coinbase import (
     COINBASE_TRADE_BATCH_WINDOW_MS,
     CoinbaseMessageProjector,
@@ -346,3 +348,99 @@ async def test_provider_diagnostics_count_messages_acks_and_rejections() -> None
     assert diagnostics["reader_final_state"] == "ended"
     assert diagnostics["reader_final_error_type"] is None
     assert diagnostics["provider_state"] == "disconnected"
+
+
+def heartbeat_message() -> dict[str, object]:
+    return {
+        "channel": "heartbeats",
+        "timestamp": "2026-08-04T15:00:02Z",
+        "sequence_num": 2,
+        "events": [],
+    }
+
+
+@pytest.mark.asyncio
+async def test_provider_stalls_and_marks_degraded_on_silent_connection() -> None:
+    subscriptions: list[dict[str, object]] = []
+
+    async def handler(websocket: ServerConnection) -> None:
+        for _ in range(3):
+            subscriptions.append(json.loads(await websocket.recv()))
+        await websocket.send(json.dumps(market_trades_message()))
+        await asyncio.sleep(1.0)
+
+    async with serve(handler, "127.0.0.1", 0) as server:
+        sockets = server.sockets
+        assert sockets
+        port = sockets[0].getsockname()[1]
+        provider = CoinbaseResearchMarketDataProvider(
+            CoinbaseResearchConfig(
+                url=f"ws://127.0.0.1:{port}",
+                use_mode="personal_research",
+                market_data_terms_accepted=True,
+                environment="research",
+                message_idle_timeout_seconds=0.2,
+            )
+        )
+        await provider.connect()
+        try:
+            await provider.subscribe(["BTC-USD"])
+            event = await asyncio.wait_for(anext(provider.events()), timeout=2.0)
+            with pytest.raises(StopAsyncIteration):
+                await asyncio.wait_for(anext(provider.events()), timeout=2.0)
+            health = await provider.health()
+            diagnostics = provider.diagnostics
+        finally:
+            await provider.disconnect()
+
+    assert event.symbol == "BTC-USD"
+    assert health.state is ProviderState.DEGRADED
+    assert health.message is not None and "no upstream message" in health.message
+    assert diagnostics["reader_final_state"] == "stalled"
+    assert diagnostics["reader_final_error_type"] is None
+    assert diagnostics["provider_state"] == "degraded"
+
+
+@pytest.mark.asyncio
+async def test_provider_heartbeats_keep_feed_alive_across_trade_pause() -> None:
+    subscriptions: list[dict[str, object]] = []
+
+    async def handler(websocket: ServerConnection) -> None:
+        for _ in range(3):
+            subscriptions.append(json.loads(await websocket.recv()))
+        await websocket.send(json.dumps(market_trades_message()))
+        try:
+            for _ in range(20):
+                await websocket.send(json.dumps(heartbeat_message()))
+                await asyncio.sleep(0.05)
+        except ConnectionClosed:
+            pass
+
+    async with serve(handler, "127.0.0.1", 0) as server:
+        sockets = server.sockets
+        assert sockets
+        port = sockets[0].getsockname()[1]
+        provider = CoinbaseResearchMarketDataProvider(
+            CoinbaseResearchConfig(
+                url=f"ws://127.0.0.1:{port}",
+                use_mode="personal_research",
+                market_data_terms_accepted=True,
+                environment="research",
+                message_idle_timeout_seconds=0.2,
+            )
+        )
+        await provider.connect()
+        try:
+            await provider.subscribe(["BTC-USD"])
+            event = await asyncio.wait_for(anext(provider.events()), timeout=2.0)
+            await asyncio.sleep(0.6)
+            health = await provider.health()
+            diagnostics = provider.diagnostics
+        finally:
+            await provider.disconnect()
+
+    assert event.symbol == "BTC-USD"
+    assert health.state is ProviderState.CONNECTED
+    assert diagnostics["reader_final_state"] == "never_started"
+    assert diagnostics["provider_state"] == "connected"
+    assert diagnostics["raw_messages_by_channel"]["heartbeats"] >= 10
