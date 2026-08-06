@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -163,6 +163,11 @@ async def capture_provider_session(
         raise RuntimeError(
             "verified ledger record count does not match the completed capture"
         )
+
+    stream_diagnostics = getattr(provider, "diagnostics", None)
+    if isinstance(stream_diagnostics, Mapping):
+        json.dump(stream_diagnostics, sys.stderr, sort_keys=True)
+        sys.stderr.write("\n")
 
     complete = completion_reason == "max_seconds"
     diagnostic: str | None = None

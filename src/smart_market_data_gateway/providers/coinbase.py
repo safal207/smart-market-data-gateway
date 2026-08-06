@@ -4,11 +4,12 @@ import asyncio
 from collections import defaultdict
 from collections.abc import AsyncIterator, Collection, Mapping, Sequence
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 import json
 import logging
+from time import monotonic
 from typing import Any, cast
 from uuid import NAMESPACE_URL, uuid5
 
@@ -35,6 +36,119 @@ COINBASE_MARKET_DATA_URL = "wss://advanced-trade-ws.coinbase.com"
 COINBASE_PROVIDER_NAME = "coinbase-advanced-trade"
 COINBASE_TRADE_BATCH_WINDOW_MS = 250
 _ALLOWED_USE_MODE = "personal_research"
+
+
+@dataclass(slots=True)
+class CoinbaseStreamDiagnostics:
+    """Privacy-safe counters for one provider session; never includes payloads."""
+
+    raw_messages_received_total: int = 0
+    raw_messages_by_channel: dict[str, int] = field(default_factory=dict)
+    projected_quote_events_total: int = 0
+    rejected_messages_total: int = 0
+    rejected_messages_by_exception_type: dict[str, int] = field(default_factory=dict)
+    queue_high_water_mark: int = 0
+    first_message_at: datetime | None = None
+    last_message_at: datetime | None = None
+    maximum_raw_message_gap_seconds: float = 0.0
+    maximum_projected_event_gap_seconds: float = 0.0
+    subscription_acknowledgements: dict[str, int] = field(default_factory=dict)
+    reader_final_state: str = "never_started"
+    reader_final_error_type: str | None = None
+    provider_state: str = "disconnected"
+    provider_message: str | None = None
+
+    _last_raw_at: float | None = None
+    _last_event_at: float | None = None
+
+    def reset(self) -> None:
+        self.raw_messages_received_total = 0
+        self.raw_messages_by_channel.clear()
+        self.projected_quote_events_total = 0
+        self.rejected_messages_total = 0
+        self.rejected_messages_by_exception_type.clear()
+        self.queue_high_water_mark = 0
+        self.first_message_at = None
+        self.last_message_at = None
+        self.maximum_raw_message_gap_seconds = 0.0
+        self.maximum_projected_event_gap_seconds = 0.0
+        self.subscription_acknowledgements.clear()
+        self.reader_final_state = "never_started"
+        self.reader_final_error_type = None
+        self.provider_state = "disconnected"
+        self.provider_message = None
+        self._last_raw_at = None
+        self._last_event_at = None
+
+    def record_raw_message(self, channel: str) -> None:
+        now = monotonic()
+        now_utc = datetime.now(UTC)
+        self.raw_messages_received_total += 1
+        self.raw_messages_by_channel[channel] = self.raw_messages_by_channel.get(channel, 0) + 1
+        if self.first_message_at is None:
+            self.first_message_at = now_utc
+        self.last_message_at = now_utc
+        if self._last_raw_at is not None:
+            gap = now - self._last_raw_at
+            if gap > self.maximum_raw_message_gap_seconds:
+                self.maximum_raw_message_gap_seconds = gap
+        self._last_raw_at = now
+
+    def record_projected_event(self) -> None:
+        now = monotonic()
+        self.projected_quote_events_total += 1
+        if self._last_event_at is not None:
+            gap = now - self._last_event_at
+            if gap > self.maximum_projected_event_gap_seconds:
+                self.maximum_projected_event_gap_seconds = gap
+        self._last_event_at = now
+
+    def record_rejected(self, exc: BaseException) -> None:
+        self.rejected_messages_total += 1
+        name = type(exc).__name__
+        self.rejected_messages_by_exception_type[name] = (
+            self.rejected_messages_by_exception_type.get(name, 0) + 1
+        )
+
+    def record_queue_depth(self, depth: int) -> None:
+        if depth > self.queue_high_water_mark:
+            self.queue_high_water_mark = depth
+
+    def record_subscription_acknowledgement(self, channel: str) -> None:
+        self.subscription_acknowledgements[channel] = (
+            self.subscription_acknowledgements.get(channel, 0) + 1
+        )
+
+    def finalize_reader(self, state: str, error_type: str | None = None) -> None:
+        self.reader_final_state = state
+        self.reader_final_error_type = error_type
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "raw_messages_received_total": self.raw_messages_received_total,
+            "raw_messages_by_channel": dict(sorted(self.raw_messages_by_channel.items())),
+            "projected_quote_events_total": self.projected_quote_events_total,
+            "rejected_messages_total": self.rejected_messages_total,
+            "rejected_messages_by_exception_type": dict(
+                sorted(self.rejected_messages_by_exception_type.items())
+            ),
+            "queue_high_water_mark": self.queue_high_water_mark,
+            "first_message_at": (
+                self.first_message_at.isoformat() if self.first_message_at is not None else None
+            ),
+            "last_message_at": (
+                self.last_message_at.isoformat() if self.last_message_at is not None else None
+            ),
+            "maximum_raw_message_gap_seconds": self.maximum_raw_message_gap_seconds,
+            "maximum_projected_event_gap_seconds": self.maximum_projected_event_gap_seconds,
+            "subscription_acknowledgements": dict(
+                sorted(self.subscription_acknowledgements.items())
+            ),
+            "reader_final_state": self.reader_final_state,
+            "reader_final_error_type": self.reader_final_error_type,
+            "provider_state": self.provider_state,
+            "provider_message": self.provider_message,
+        }
 
 
 class CoinbaseUsageError(PermissionError):
@@ -275,10 +389,16 @@ class CoinbaseResearchMarketDataProvider(MarketDataProvider):
         self._reader_task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
         self._heartbeats_subscribed = False
+        self._diagnostics = CoinbaseStreamDiagnostics()
 
     @property
     def name(self) -> str:
         return COINBASE_PROVIDER_NAME
+
+    @property
+    def diagnostics(self) -> dict[str, object]:
+        """Privacy-safe counters for the current or last session, never payloads."""
+        return self._diagnostics.as_dict()
 
     @property
     def capabilities(self) -> frozenset[MarketEvidenceCapability]:
@@ -297,8 +417,10 @@ class CoinbaseResearchMarketDataProvider(MarketDataProvider):
         async with self._lock:
             if self._reader_task is not None and not self._reader_task.done():
                 return
+            self._diagnostics.reset()
             self._state = ProviderState.CONNECTING
             self._message = None
+            self._sync_diagnostics_state()
             self._projector.clear_connection_state()
             try:
                 self._connection = await connect(
@@ -314,12 +436,14 @@ class CoinbaseResearchMarketDataProvider(MarketDataProvider):
             except Exception as exc:
                 self._state = ProviderState.DEGRADED
                 self._message = str(exc)
+                self._sync_diagnostics_state()
                 raise
             self._reader_task = asyncio.create_task(
                 self._reader_loop(),
                 name="coinbase-market-data-reader",
             )
             self._state = ProviderState.CONNECTED
+            self._sync_diagnostics_state()
             self._heartbeats_subscribed = False
 
     async def disconnect(self) -> None:
@@ -332,6 +456,7 @@ class CoinbaseResearchMarketDataProvider(MarketDataProvider):
             self._state = ProviderState.DISCONNECTED
             self._message = None
             self._heartbeats_subscribed = False
+            self._sync_diagnostics_state()
 
         if task is not None:
             task.cancel()
@@ -385,20 +510,75 @@ class CoinbaseResearchMarketDataProvider(MarketDataProvider):
                     if not isinstance(parsed, Mapping):
                         raise CoinbaseProtocolError("WebSocket message must be a JSON object")
                     payload = cast(Mapping[str, Any], parsed)
-                    for event in self._projector.apply(payload):
-                        if event.symbol in self._symbols:
-                            await self._queue.put(event)
-                except (TypeError, ValueError):
+                    channel = str(payload.get("channel", "")).strip() or "unknown"
+                except (TypeError, ValueError) as exc:
+                    channel = "unparsed"
+                    self._diagnostics.record_raw_message(channel)
+                    self._diagnostics.record_rejected(exc)
                     logger.warning(
                         "Coinbase market-data message rejected",
                         extra={"event": "coinbase_message_rejected"},
                         exc_info=True,
                     )
+                    continue
+                self._diagnostics.record_raw_message(channel)
+                try:
+                    if channel == "subscriptions":
+                        self._record_subscription_acknowledgements(payload)
+                    for event in self._projector.apply(payload):
+                        if event.symbol in self._symbols:
+                            await self._queue.put(event)
+                            self._diagnostics.record_projected_event()
+                            self._diagnostics.record_queue_depth(self._queue.qsize())
+                except (TypeError, ValueError) as exc:
+                    self._diagnostics.record_rejected(exc)
+                    logger.warning(
+                        "Coinbase market-data message rejected",
+                        extra={"event": "coinbase_message_rejected"},
+                        exc_info=True,
+                    )
+            self._diagnostics.finalize_reader("ended")
+            self._state = ProviderState.DEGRADED
+            self._message = "upstream stream ended"
+            self._sync_diagnostics_state()
         except asyncio.CancelledError:
+            self._diagnostics.finalize_reader("cancelled")
             raise
         except Exception as exc:
+            self._diagnostics.finalize_reader("failed", type(exc).__name__)
             self._state = ProviderState.DEGRADED
             self._message = str(exc)
+            self._sync_diagnostics_state()
+
+    def _record_subscription_acknowledgements(self, payload: Mapping[str, Any]) -> None:
+        for key in ("subscriptions", "channels"):
+            value = payload.get(key)
+            if value is not None:
+                self._record_acknowledged_channels(value, f"{key}")
+        events = _nested_sequence_value(payload, "events")
+        if not isinstance(events, list):
+            return
+        for event in _mapping_sequence(events, "events"):
+            for key in ("subscriptions", "channels"):
+                value = event.get(key)
+                if value is not None:
+                    self._record_acknowledged_channels(value, f"events.{key}")
+
+    def _record_acknowledged_channels(self, value: object, field: str) -> None:
+        if isinstance(value, list):
+            for item in _mapping_sequence(value, f"{field}.items"):
+                name = str(item.get("name", "")).strip()
+                if name:
+                    self._diagnostics.record_subscription_acknowledgement(name)
+            return
+        if isinstance(value, Mapping):
+            for name in value:
+                if isinstance(name, str) and name:
+                    self._diagnostics.record_subscription_acknowledgement(name)
+
+    def _sync_diagnostics_state(self) -> None:
+        self._diagnostics.provider_state = self._state.name.lower()
+        self._diagnostics.provider_message = self._message
 
     def _require_connection(self) -> ClientConnection:
         if self._connection is None:
@@ -422,6 +602,19 @@ def _mapping_sequence(value: object, field: str) -> tuple[Mapping[str, Any], ...
             raise CoinbaseProtocolError(f"{field} items must be objects")
         result.append(cast(Mapping[str, Any], item))
     return tuple(result)
+
+
+def _nested_sequence_value(
+    payload: Mapping[str, Any],
+    *level_names: str,
+) -> object:
+    """Return the value at a fixed nested path that may be absent."""
+    candidate: object = payload
+    for name in level_names:
+        if not isinstance(candidate, Mapping):
+            return None
+        candidate = candidate.get(name)
+    return candidate
 
 
 def _symbol(value: object) -> str:

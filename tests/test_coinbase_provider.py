@@ -249,3 +249,100 @@ async def test_provider_connects_subscribes_and_emits_rich_event_over_websocket(
     assert event.symbol == "BTC-USD"
     assert event.volume == Decimal("0.50")
     assert event.bid_depth == Decimal("2.50")
+
+
+def subscription_ack_message() -> dict[str, object]:
+    return {
+        "channel": "subscriptions",
+        "timestamp": "2026-08-04T15:00:01Z",
+        "sequence_num": 1,
+        "events": [
+            {
+                "type": "subscriptions",
+                "subscriptions": [
+                    {"name": "heartbeats", "product_ids": []},
+                    {"name": "ticker", "product_ids": ["BTC-USD"]},
+                    {"name": "market_trades", "product_ids": ["BTC-USD"]},
+                ],
+            }
+        ],
+    }
+
+
+def ticker_batch_message() -> dict[str, object]:
+    return {
+        "channel": "ticker_batch",
+        "timestamp": "2026-08-04T15:00:03Z",
+        "sequence_num": 4,
+        "events": [{"type": "update", "tickers": []}],
+    }
+
+
+@pytest.mark.asyncio
+async def test_provider_diagnostics_count_messages_acks_and_rejections() -> None:
+    subscriptions: list[dict[str, object]] = []
+
+    async def handler(websocket: ServerConnection) -> None:
+        for _ in range(3):
+            subscriptions.append(json.loads(await websocket.recv()))
+        await websocket.send(json.dumps(subscription_ack_message()))
+        await websocket.send(
+            json.dumps(
+                {
+                    "channel": "heartbeats",
+                    "timestamp": "2026-08-04T15:00:02Z",
+                    "sequence_num": 2,
+                    "events": [],
+                }
+            )
+        )
+        await websocket.send(json.dumps(ticker_message()))
+        await websocket.send(json.dumps(ticker_batch_message()))
+        await websocket.send("not-json")
+        await websocket.send(json.dumps(market_trades_message()))
+        await asyncio.sleep(0.2)
+
+    async with serve(handler, "127.0.0.1", 0) as server:
+        sockets = server.sockets
+        assert sockets
+        port = sockets[0].getsockname()[1]
+        provider = CoinbaseResearchMarketDataProvider(
+            CoinbaseResearchConfig(
+                url=f"ws://127.0.0.1:{port}",
+                use_mode="personal_research",
+                market_data_terms_accepted=True,
+                environment="research",
+            )
+        )
+        await provider.connect()
+        try:
+            await provider.subscribe(["BTC-USD"])
+            event = await asyncio.wait_for(anext(provider.events()), timeout=2.0)
+            await asyncio.sleep(0.5)
+        finally:
+            await provider.disconnect()
+
+    assert event.symbol == "BTC-USD"
+    diagnostics = provider.diagnostics
+    assert diagnostics["raw_messages_received_total"] == 6
+    assert diagnostics["raw_messages_by_channel"] == {
+        "heartbeats": 1,
+        "market_trades": 1,
+        "subscriptions": 1,
+        "ticker": 1,
+        "ticker_batch": 1,
+        "unparsed": 1,
+    }
+    assert diagnostics["projected_quote_events_total"] == 1
+    assert diagnostics["rejected_messages_total"] == 1
+    assert diagnostics["rejected_messages_by_exception_type"] == {
+        "JSONDecodeError": 1
+    }
+    assert diagnostics["subscription_acknowledgements"] == {
+        "heartbeats": 1,
+        "market_trades": 1,
+        "ticker": 1,
+    }
+    assert diagnostics["reader_final_state"] == "ended"
+    assert diagnostics["reader_final_error_type"] is None
+    assert diagnostics["provider_state"] == "disconnected"
